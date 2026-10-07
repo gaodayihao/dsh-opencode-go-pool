@@ -26,7 +26,7 @@
 import z from '@deepseek-ai/schemastery'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   assertUsableApiKey,
@@ -49,7 +49,7 @@ import {
 
 export const name = 'opencode-go-pool'
 
-const NS = settingsNamespace('opencode-go-pool')
+const NS = 'opencode-go-pool'
 const DISPLAY_NAME = 'OpenCode Zen Go（池）'
 const DEFAULT_ROUTE = 'opencode-go'
 const ALT_ROUTE = 'opencode-go-pool'
@@ -61,6 +61,12 @@ const DEFAULT_TIMEOUT_MS = 15000
 const USAGE_CACHE_TTL_MS = 15000
 const REVIVE_THRESHOLD_PERCENT = 98
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000
+// Adapter-owned image budgets llm-pi-ai resolves into every profile; the
+// hand-built catalog profile below has to carry them too (same values as
+// llm-pi-ai's own resolved defaults).
+const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
+const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
 /** The default bounded transient-retry code set, plus quota for pool rotation. */
 const BASE_RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']
@@ -88,6 +94,72 @@ export const Config = z.object({
   timeoutMs: z.number().min(1000).max(120000).default(DEFAULT_TIMEOUT_MS),
 })
 
+/** Safe configuration used until the injected settings scope is ready. */
+const FALLBACK_CONFIG = Object.freeze({
+  route: DEFAULT_ROUTE,
+  keys: [],
+  preemptAtPercent: 100,
+  switchAfterConsecutiveFailures: 0,
+  modelMode: 'all',
+  models: [],
+  usageBaseUrl: DEFAULT_USAGE_BASE_URL,
+  modelsBaseUrl: DEFAULT_MODELS_BASE_URL,
+  usageRefreshMs: DEFAULT_USAGE_REFRESH_MS,
+  timeoutMs: DEFAULT_TIMEOUT_MS,
+})
+
+/** Read a plain section from a resolved config, unwrapping per-field volatile refs. */
+function plainConfig(value) {
+  const source = typeof value?.get === 'function' ? value.get() : value
+  if (source === null || typeof source !== 'object' || Array.isArray(source)) return {}
+  return Object.fromEntries(Object.entries(source).map(([key, item]) => [
+    key,
+    typeof item?.get === 'function' ? item.get() : item,
+  ]))
+}
+
+/**
+ * Adapt the settings scope across DSH SDK generations.
+ *
+ * Newer SDKs expose SettingsProvider.register(). DSH 0.1.7 has no such method
+ * but does expose the config-editor service, which is read inside an
+ * inject(['configEditor']) callback (direct property access throws without
+ * inject). Either way the scope is restart-scoped: a profile-patch change
+ * reloads the plugin, so there is no live watch to bind here.
+ */
+export function createSettingsScope(ctx, initialConfig, entry, editor) {
+  if (typeof ctx.settings?.register === 'function') {
+    return ctx.settings.register(NS, Config, {
+      base: initialConfig ?? {},
+      validate: validateSection,
+    })
+  }
+  const activeEditor = editor ?? ctx.configEditor
+  if (typeof activeEditor?.edit !== 'function') {
+    throw new Error('opencode-go-pool: no compatible settings scope is available')
+  }
+
+  const activeEntry = entry ?? ctx.fiber?.entry ?? { id: NS, name: 'dsh-opencode-go-pool' }
+  const resolved = () => ({ ...FALLBACK_CONFIG, ...(initialConfig ?? {}), ...plainConfig(ctx.fiber?.config) })
+  return {
+    get: resolved,
+    // DSH 0.1.7 reloads the plugin on a profile-patch change; the scope is
+    // intentionally restart-scoped and owns no live listener.
+    watch: () => () => {},
+    update: async (patch) => {
+      await activeEditor.edit(activeEntry, current => {
+        const next = { ...plainConfig(current), ...patch }
+        validateSection(next)
+        return next
+      })
+    },
+    replace: async (section) => {
+      validateSection(section)
+      await activeEditor.edit(activeEntry, () => section)
+    },
+  }
+}
+
 /** Cross-field constraints the schema cannot express; refuses the write. */
 function validateSection(value) {
   assertKeyList(value.keys ?? [])
@@ -101,8 +173,15 @@ function validateSection(value) {
  * resolveModel / stream: pi-ai reads `provider.getModels()` on every call, so
  * appending freshly pulled descriptors makes new supplier models usable
  * without a pi-ai package release. Known (shipped) models are never touched.
+ *
+ * The returned object is a *resolved* llm-pi-ai profile, so it must carry every
+ * adapter-owned field that package reads; llm-pi-ai resolves them from its own
+ * Config, and this plugin owns the route directly instead.
+ * @param route - provider route id (e.g. opencode-go).
+ * @param dynamicDescriptors - `(route) => descriptors` for fetched models.
+ * @returns the profile llm-pi-ai serves this route from.
  */
-function buildProfile(route, dynamicDescriptors) {
+export function buildProfile(route, dynamicDescriptors) {
   const upstream = opencodeGoProvider()
   if (upstream.id !== route) upstream.id = route
   const provider = {
@@ -117,9 +196,18 @@ function buildProfile(route, dynamicDescriptors) {
     provider: route,
     displayName: DISPLAY_NAME,
     streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    maxRequestImageBytes: DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+    requestImagePixelBudget: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
+    requestImageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
     retryPolicy: resolveRetryPolicy(undefined, 'opencode-go-pool.catalog.retryPolicy'),
     piProvider: provider,
     configuredMaxTokens: new Map(),
+    // llm-pi-ai 0.1.7's PiAiAdapter.modelOf() reads profile.modelErrors before
+    // it resolves any model, so a profile without this map fails every
+    // resolveModel/listModels-info/stream with "Cannot read properties of
+    // undefined (reading 'get')" — the catalog route declares no per-model
+    // failures, exactly as config.ts resolves a catalog with none.
+    modelErrors: new Map(),
     // Newer llm-pi-ai builds read modelCapabilities in listModels; a catalog
     // route with no configured overrides declares none, so an empty map is
     // the exact contract (capabilityInfo() returns no claims).
@@ -275,11 +363,10 @@ export class OpenCodeGoPool extends TypertRemoteService {
     this.ctx = ctx
     this.logger = ctx.logger ?? console
 
-    this.scope = ctx.settings.register(NS, Config, {
-      base: config ?? {},
-      validate: validateSection,
-    })
-    this.current = () => this.scope.get()
+    const rawConfig = plainConfig(config)
+    this.scope = null
+    this.settingsError = null
+    this.current = () => ({ ...FALLBACK_CONFIG, ...rawConfig, ...plainConfig(this.scope?.get?.()) })
 
     this.pool = new KeyPool({
       stateFile: dshHomePath('opencode-go-pool.state.json'),
@@ -304,7 +391,29 @@ export class OpenCodeGoPool extends TypertRemoteService {
     this.lastModelSelection = null
 
     this.applyConfig()
-    this.scope.watch(() => this.applyConfig())
+
+    const bindScope = (editor) => {
+      try {
+        const scope = createSettingsScope(ctx, rawConfig, ctx.fiber?.entry, editor)
+        this.scope = scope
+        scope.watch(() => this.applyConfig())
+        this.applyConfig()
+      } catch (error) {
+        this.settingsError = String((error && error.message) || error)
+        this.logger?.warn?.(`[opencode-go-pool] settings unavailable: ${this.settingsError}`)
+      }
+    }
+    if (typeof ctx.settings?.register === 'function') {
+      bindScope()
+    } else {
+      try {
+        ctx.inject(['configEditor'], configCtx => bindScope(configCtx.configEditor))
+      } catch (error) {
+        this.settingsError = String((error && error.message) || error)
+        this.logger?.warn?.(`[opencode-go-pool] settings unavailable: ${this.settingsError}`)
+      }
+    }
+
     this.offAdaptersUpdated = ctx.on('llm/adapters-updated', () => {
       if (this.servingRoute === null) this.tryRegister()
     })
@@ -557,6 +666,8 @@ export class OpenCodeGoPool extends TypertRemoteService {
       activeId: this.pool.activeId,
       lastSwitch: this.pool.lastSwitch,
       takeoverHint: this.servingRoute ? null : this.lastTakeoverError,
+      settingsAvailable: this.scope !== null,
+      settingsHint: this.scope !== null ? null : (this.settingsError ?? 'the settings service exposes no writable seam'),
       keys: entries.map(entry => {
         const st = this.pool.stateOf(entry.id)
         const result = usageResults.find(item => item.id === entry.id)
@@ -591,9 +702,16 @@ export class OpenCodeGoPool extends TypertRemoteService {
     return true
   }
 
+  /** The bound settings scope, or a descriptive failure when none is available. */
+  requireScope() {
+    if (this.scope !== null) return this.scope
+    const reason = this.settingsError ?? 'the settings service exposes no writable seam'
+    throw new Error(`opencode-go-pool: settings are unavailable — ${reason}`)
+  }
+
   async putKeys(keys) {
     assertKeyList(keys)
-    await this.scope.update({ keys })
+    await this.requireScope().update({ keys })
     return true
   }
 
@@ -651,7 +769,7 @@ export class OpenCodeGoPool extends TypertRemoteService {
     if (effective.modelMode === 'custom' && (!Array.isArray(effective.models) || effective.models.length === 0)) {
       throw new Error('custom model selection needs at least one model — pick models or use modelMode "all"')
     }
-    await this.scope.update(patch)
+    await this.requireScope().update(patch)
     return true
   }
 
