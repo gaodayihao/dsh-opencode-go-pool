@@ -2,27 +2,31 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 // Regression: llm-pi-ai's PiAiAdapter resolves a hand-built profile on every
-// model query. Its 0.1.7 release reads `profile.modelErrors` inside modelOf(),
-// so a profile that omits the map throws
+// model query. Its modelOf() reads `profile.modelErrors` before it resolves any
+// model, so a profile that omits the map throws
 // "Cannot read properties of undefined (reading 'get')" for every
 // resolveModel/resolveModelInfo/stream — which surfaced as a failed model group
 // in the model picker and as a failed agent turn ("本轮运行失败"). The plugin
 // owns the route directly, so it has to supply the whole resolved profile.
 //
+// 0.2.1 also made the adapter's `auth` option mandatory (a collection without
+// it gets pi-ai's empty in-memory store), and the plugin's own createPiAiAuth()
+// supplies the records-free injection this adapter family needs.
+//
 // The unit assertions below pin the fields; the adapter check runs the real
 // installed adapter, which catches the crash on any release that reads them.
 
 async function loadProfile(t) {
-  let buildProfile, resolveRetryPolicy, PiAiAdapter
+  let buildProfile, resolveRetryPolicy, PiAiAdapter, createPiAiAuth
   try {
-    ;({ buildProfile } = await import('../index.js'))
+    ;({ buildProfile, createPiAiAuth } = await import('../index.js'))
     ;({ resolveRetryPolicy } = await import('@deepseek-ai/dsh-llm'))
     ;({ PiAiAdapter } = await import('@deepseek-ai/dsh-llm-pi-ai'))
   } catch {
     t.skip('harness peer deps not installed — link the DSH node_modules to run the profile tests')
     return null
   }
-  return { buildProfile, resolveRetryPolicy, PiAiAdapter }
+  return { buildProfile, resolveRetryPolicy, PiAiAdapter, createPiAiAuth }
 }
 
 const route = 'opencode-go'
@@ -65,7 +69,7 @@ test('the hand-built profile carries every adapter-owned field', async (t) => {
 test('the installed PiAiAdapter resolves a model from the hand-built profile', async (t) => {
   const harness = await loadProfile(t)
   if (harness === null) return
-  const { buildProfile, PiAiAdapter } = harness
+  const { buildProfile, PiAiAdapter, createPiAiAuth } = harness
   const fetched = [{ id: 'brand-new-model', name: 'Brand New Model' }]
   const profile = buildProfile(route, () => fetched.map(model => ({
     id: model.id,
@@ -82,6 +86,7 @@ test('the installed PiAiAdapter resolves a model from the hand-built profile', a
   const adapter = new PiAiAdapter({
     profiles: () => new Map([[route, profile]]),
     resolveApiKey: async () => { throw new Error('the catalog adapter never resolves keys') },
+    auth: createPiAiAuth({ get: () => undefined }),
     resolveAttachments: () => undefined,
   })
 
@@ -94,4 +99,30 @@ test('the installed PiAiAdapter resolves a model from the hand-built profile', a
     ? (await adapter.prepareCall(route, fetchedModel.id)).model
     : await adapter.resolveModel(route, fetchedModel.id)
   assert.equal(resolved.id, fetchedModel.id, 'the adapter resolves the model through the profile')
+})
+
+test('createPiAiAuth declares no pi-ai credential records and refuses writes', async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { createPiAiAuth } = harness
+  const ctx = {
+    get: (name) => (name === 'credentials'
+      ? { resolve: async () => ({ value: 'sk-from-seam' }) }
+      : undefined),
+  }
+  const auth = createPiAiAuth(ctx)
+
+  assert.equal(await auth.credentials.read(route), undefined, 'reads answer "nothing stored"')
+  assert.deepEqual(await auth.credentials.list(), [], 'no records are listed')
+  await assert.rejects(
+    () => auth.credentials.modify(route, async () => undefined),
+    /apiKeyEnv/,
+    'a write that cannot land must not report success',
+  )
+  await auth.credentials.delete(route)
+
+  assert.equal(await auth.authContext.env('OPENCODE_GO_KEY_A'), 'sk-from-seam', 'references resolve through the seam')
+  assert.equal(await auth.authContext.env('not-a-reference'), process.env['not-a-reference'])
+  assert.equal(await auth.authContext.fileExists('~'), true, 'the home directory exists')
+  assert.equal(await auth.authContext.fileExists('~/.definitely-missing-dsh-probe'), false)
 })

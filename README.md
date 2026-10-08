@@ -4,6 +4,7 @@ DeepSeek Harness（DSH）插件：**OpenCode Go 套餐的多 Key 池** —— �
 
 - 每个 OpenCode Go 账号有独立的 5 小时滚动 + 每周 + 每月额度。DSH 官方供应商（`dsh-llm-pi-ai` 的 `opencode-go` 路由）每个供应商只能填一个 Key，额度耗尽后必须手动更换——本插件接管该路由，用 Key 池 + 自动故障切换解决。
 - 余额数据来自 OpenCode 官方用量接口（与官网同源，见下文）。
+- **运行环境**：DSH `0.2.1-alpha.1`（`peerDependencies` 锁定该系列；0.1.x 的设置 seam 仍兼容，但新特性以 0.2.1 的 volatile 配置为准）。
 
 ## 功能
 
@@ -23,7 +24,7 @@ DeepSeek Harness（DSH）插件：**OpenCode Go 套餐的多 Key 池** —— �
 dsh plugin --profile web add github:whitelonng/dsh-opencode-go-pool
 ```
 
-重启 DSH（插件变更需重启生效）。随后：
+安装/升级插件本身需重启 DSH 一次。此后在卡片里增删 Key、改阈值、改模型选择都会**即时生效**：这些字段在 DSH 0.2.1 里是 volatile 配置，Loader 原地更新，不会重挂插件、也不打断进行中的会话。随后：
 
 1. **迁移**：打开「设置 → 模型」，删除 `opencode-go` 供应商行（本插件会自动接管该路由；未删除时插件保持休眠并在卡片中显示引导）。
 2. **配置 Key**：打开「设置 → OpenCode Go 套餐池」→「Key 管理」，为每个账号添加一行（id 自动生成；label 为显示名；凭据引用填环境变量名，如 `OPENCODE_GO_KEY_A`）。
@@ -75,7 +76,8 @@ flowchart TD
 - **路由接管**：`opencode-go` 路由被 `dsh-llm-pi-ai` 持有时，插件休眠并监听 `llm/adapters-updated`，路由一释放即原子接管；老会话记录的路由 id 不变，历史对话无缝继续。
 - **凭据**：配置只存凭据引用名（`apiKeyEnv`），明文走 DSH 凭据 seam，每次请求按引用解析；解析失败大声报 `MISSING_CREDENTIAL`，绝不回落到无关的环境变量 Key。
 - **模型选择**：卡片勾选后写入 `modelMode`/`models`；适配器的 `listModels` 只返回勾选的模型（聊天模型下拉即时生效），`resolveModel`/`stream` 对未勾选模型返回明确的 `UNKNOWN_MODEL`。选择变化会重发 `llm/adapters-updated`，模型选择器无需重启即可刷新。
-- **适配器画像**：接管模式直接向 `dsh-llm-pi-ai` 提供该路由的*已解析* profile（`piProvider` 加 `modelErrors`、`configuredMaxTokens`、图像预算等适配器自有字段）。这些字段平时由 llm-pi-ai 的 `Config` 解析产生，插件自建时必须齐备：0.1.7 的 `PiAiAdapter.modelOf()` 先读 `profile.modelErrors`，缺这个 Map 时每个模型的解析与流式请求都会抛 `Cannot read properties of undefined (reading 'get')`——模型选择器里该分组显示「加载失败」，进行中的会话则整轮失败。回归测试见 `test/profile.test.mjs`。
+- **设置写入**：卡片经 Typert RPC 调 `putKeys`/`putConfig`，host 侧走 DSH 0.2.1 的 `ctx.settings.update(entryId, patch, revision)`（config-editor 支撑的 SettingsForms）；插件 Config 中卡片可编辑的字段声明为 `volatile`，Loader 原地更新并广播 `loader/volatile-update`，插件据此重算 KeyPool / 路由，插件实例不重挂。`route` 保持普通字段：改路由会重挂插件并重新注册适配器。
+- **适配器画像与 auth**：接管模式直接向 `dsh-llm-pi-ai` 提供该路由的*已解析* profile（`piProvider`、`modelErrors`、`configuredMaxTokens`、图像预算等适配器自有字段）。这些字段平时由 llm-pi-ai 的 `Config` 解析产生，插件自建时必须齐备：`PiAiAdapter.modelOf()` 先读 `profile.modelErrors`，缺这个 Map 时每个模型的解析与流式请求都会抛 `Cannot read properties of undefined (reading 'get')`。0.2.1 还把适配器的 `auth`（`{credentials, authContext}`）从可选改为必填，插件提供 `createPiAiAuth()`：不写 pi-ai 凭据记录（Key 一律用 `apiKeyEnv` 引用），只把环境/API 引用解析交给 credentials seam。回归测试见 `test/profile.test.mjs` 与 `test/settings-forms.test.mjs`。
 - **持久化**：运行态（活动 Key / 耗尽 / 失效 / 停用）原子写入 `$DSH_HOME/opencode-go-pool.state.json`，重启恢复。
 
 ## 用量接口
@@ -120,7 +122,7 @@ Authorization: Bearer <OpenCode Go API Key>
 
 - Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（38 项：状态机 13、用量网关 7、cordis 烟测 8（接管协议与静默切换端到端）、真实服务集成 5（LlmRuntime 注册表/llm.stream 全链路/settings 写入/接管握手）、客户端 bundle 执行与渲染 5；缺少 harness 依赖时相关测试优雅跳过）
+- 测试：`node --test test/*.test.mjs`（75 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、cordis 烟测 12（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam）、真实服务集成 9（`integration`：真实 `LlmRuntime` 注册表 / `llm.stream` 全链路 / settings 写入契约 / 接管握手）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 3（`profile`）、导入与 Typert 清单 7、客户端 bundle 执行与渲染 9（`client`）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -136,9 +138,15 @@ node --test test/*.test.mjs
 
 MIT
 
-## 验证记录（无 GUI 真实启动）
+## 验证记录
 
-除 38 项测试外，插件已在真实 DSH host 中完成无 GUI 启动验证（dsh CLI + 一次性测试 profile）：
+**0.2.1-alpha.1 升级验证（2026-10-08）**：`node --test test/*.test.mjs` → 75 项全部通过、0 跳过，跑在 registry 安装的 `0.2.1-alpha.1` 依赖上（`@deepseek-ai/cordis@4.0.5-alpha.1`、`schemastery@3.18.5-alpha.1`、`@earendil-works/pi-ai@0.87.1`）。其中：
+
+- `test/settings-forms.test.mjs` 用**真实** `@deepseek-ai/dsh-settings`（SettingsForms）核对：插件 `Config` 暴露为可编辑表单的字段恰为卡片可编辑的 5 个 volatile 字段，`route` 保持普通字段并被服务拒绝写入；`settings.update(entryId, patch, revision)` 的合并结果、revision 栅栏（`SETTINGS_CONFLICT`）都符合预期。
+- `test/integration.test.mjs` 用**真实** `LlmRuntime` 与 `PiAiAdapter`：注册表 / `llm.stream` 全链路 / 接管握手。
+- `test/profile.test.mjs` 用**真实** `PiAiAdapter` 校验手写 profile 与新增的 `auth` 注入。
+
+**无 GUI 真实启动验证**（在有可用运行时的机器上执行；本仓库的开发沙箱里 `node-addon-require-builtin` 无法挂接该 Node 构建的 ESM loader，报 `Unsupported/no-getter`，故无法在此复现）：
 
 ```sh
 DSH_HOME=/tmp/dsh-boot-test/home \

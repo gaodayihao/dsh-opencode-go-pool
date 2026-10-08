@@ -3,6 +3,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { createFormsSettings } from './fixtures/forms-settings.mjs'
 
 // Cordis-context smoke tests. They exercise the real plugin against mocked
 // seams, but need the DeepSeek Harness peer dependencies installed. In a
@@ -47,26 +48,21 @@ function makeMockLlms() {
   }
 }
 
-function makeMockSettings(get) {
-  const scope = {
-    get,
-    watch: () => () => {},
-    update: async () => {},
-    replace: async () => {},
-  }
-  return {
-    scope,
-    register: () => scope,
-  }
-}
-
-const CONFIG = {
-  route: 'opencode-go',
-  keys: [],
-  preemptAtPercent: 100,
-  usageBaseUrl: 'https://opencode.ai/zen/go/v1/usage',
-  usageRefreshMs: 30000,
-  timeoutMs: 15000,
+/**
+ * Boot the plugin against the DSH 0.2.1 settings surface: the forms-settings
+ * double stands in for `@deepseek-ai/dsh-settings`, and the plugin's own
+ * validated Config carries the volatile refs the double writes in place.
+ */
+async function bootPlugin(Context, OpenCodeGoPool, rawConfig, options = {}) {
+  const root = options.root ?? new Context()
+  const llms = options.llms ?? makeMockLlms()
+  const settings = createFormsSettings(root)
+  root.provide('llm', llms)
+  root.provide('settings', settings.service)
+  root.provide('credentials', options.credentials ?? { resolve: async () => undefined })
+  const fiber = await root.plugin(OpenCodeGoPool, rawConfig)
+  settings.bind(fiber.config)
+  return { root, llms, settings: settings.state, plugin: root.get('opencodePool') }
 }
 
 test('plugin registers the opencode-go route and serves the pi-ai catalog', async (t) => {
@@ -74,13 +70,7 @@ test('plugin registers the opencode-go route and serves the pi-ai catalog', asyn
   if (!harness) return
   const { Context, OpenCodeGoPool } = harness
 
-  const root = new Context()
-  const llms = makeMockLlms()
-  root.provide('llm', llms)
-  root.provide('settings', makeMockSettings(() => CONFIG))
-  root.provide('credentials', { resolve: async () => undefined })
-
-  await root.plugin(OpenCodeGoPool, {})
+  const { root, llms } = await bootPlugin(Context, OpenCodeGoPool, {})
   assert.ok(llms.adapter, 'pool adapter registered')
   assert.deepEqual(llms.registered[0], ['opencode-go'])
 
@@ -110,16 +100,9 @@ test('a key without a resolvable credential fails the stream loud (MISSING_CREDE
   if (!harness) return
   const { Context, OpenCodeGoPool } = harness
 
-  const root = new Context()
-  const llms = makeMockLlms()
-  root.provide('llm', llms)
-  root.provide('settings', makeMockSettings(() => ({
-    ...CONFIG,
+  const { root, llms } = await bootPlugin(Context, OpenCodeGoPool, {
     keys: [{ id: 'acc-a', label: '主号', apiKeyEnv: 'OPENCODE_GO_KEY_A' }],
-  })))
-  root.provide('credentials', { resolve: async () => undefined })
-
-  await root.plugin(OpenCodeGoPool, {})
+  })
   const stream = llms.adapter.stream({
     provider: 'opencode-go',
     model: 'deepseek-v4-flash',
@@ -136,18 +119,89 @@ test('status() reports the pool without network when keys are empty', async (t) 
   if (!harness) return
   const { Context, OpenCodeGoPool } = harness
 
-  const root = new Context()
-  const llms = makeMockLlms()
-  root.provide('llm', llms)
-  root.provide('settings', makeMockSettings(() => CONFIG))
-  root.provide('credentials', { resolve: async () => undefined })
-
-  await root.plugin(OpenCodeGoPool, {})
-  const plugin = root.get('opencodePool')
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool, {})
   const status = await plugin.status()
   assert.equal(status.takeover, 'serving')
   assert.equal(status.route, 'opencode-go')
   assert.deepEqual(status.keys, [])
+  await root.fiber.dispose()
+})
+
+test('putKeys applies live through the 0.2.1 forms seam without remounting', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  /** Count constructions to prove a volatile write does not remount the plugin. */
+  let constructions = 0
+  class CountingPool extends OpenCodeGoPool {
+    constructor(...args) {
+      super(...args)
+      constructions += 1
+    }
+  }
+
+  const { root, settings, plugin } = await bootPlugin(Context, CountingPool, {})
+  assert.equal(constructions, 1)
+  assert.equal(plugin.pool.keyCount(), 0)
+
+  await plugin.putKeys(TWO_KEYS)
+  assert.equal(settings.writes.length, 1, 'putKeys writes through the settings service')
+  assert.equal(settings.writes[0].ns, 'opencode-go-pool', 'the write targets the plugin entry id')
+  assert.deepEqual(settings.writes[0].patch.keys.map(key => key.id), ['acc-a', 'acc-b'])
+  assert.equal(plugin.pool.keyCount(), 2, 'the in-place volatile write reaches the running pool')
+  assert.equal(constructions, 1, 'the volatile write did not remount the plugin')
+
+  // The model selection takes the same live path.
+  await plugin.putConfig({ modelMode: 'custom', models: ['deepseek-v4-flash'] })
+  assert.deepEqual([...plugin.modelSelection()], ['deepseek-v4-flash'])
+  assert.equal(settings.writes[1].ns, 'opencode-go-pool')
+
+  // Validation still refuses a bad write before it reaches the seam.
+  await assert.rejects(
+    () => plugin.putKeys([
+      { id: 'acc-a', label: 'A', apiKeyEnv: 'OPENCODE_GO_KEY_A' },
+      { id: 'acc-b', label: 'B', apiKeyEnv: 'OPENCODE_GO_KEY_A' },
+    ]),
+    /duplicate apiKeyEnv/,
+  )
+  assert.equal(settings.writes.length, 2, 'a refused write never reaches the settings seam')
+  await root.fiber.dispose()
+})
+
+test('still binds the 0.1.x SettingsProvider.register seam when it is the only one', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const root = new Context()
+  const llms = makeMockLlms()
+  const writes = []
+  let section = { keys: [] }
+  root.provide('llm', llms)
+  root.provide('settings', {
+    register: (ns, schema, options) => {
+      assert.equal(ns, 'opencode-go-pool')
+      assert.ok(schema, 'the plugin Config schema is registered')
+      assert.equal(typeof options.validate, 'function')
+      assert.ok(options.base, 'the resolved entry config is the base layer')
+      return {
+        get: () => section,
+        watch: () => () => {},
+        update: async (patch) => { writes.push(patch); section = { ...section, ...patch } },
+        replace: async (next) => { section = next },
+      }
+    },
+  })
+  root.provide('credentials', { resolve: async () => undefined })
+
+  await root.plugin(OpenCodeGoPool, {})
+  const plugin = root.get('opencodePool')
+  assert.ok(plugin.scope, 'the registered scope is bound')
+  await plugin.putKeys([{ id: 'acc-a', label: 'A', apiKeyEnv: 'OPENCODE_GO_KEY_A' }])
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].keys[0].id, 'acc-a')
+  assert.equal(plugin.current().keys.length, 1, 'the registered scope is authoritative for reads')
   await root.fiber.dispose()
 })
 
@@ -234,12 +288,7 @@ test('takeover: dormant while the route is owned elsewhere, auto-registers on ad
     recorded.push([...routes])
     return { replace: next => { recorded.push([...next]) } }
   }
-  root.provide('llm', llms)
-  root.provide('settings', makeMockSettings(() => CONFIG))
-  root.provide('credentials', { resolve: async () => undefined })
-
-  await root.plugin(OpenCodeGoPool, {})
-  const plugin = root.get('opencodePool')
+  const { plugin } = await bootPlugin(Context, OpenCodeGoPool, {}, { root, llms })
 
   // While pi-ai (or any plugin) owns the route: dormant, surfaced as waiting.
   assert.equal(plugin.takeoverState(), 'waiting')
@@ -290,13 +339,7 @@ const REQUEST = {
 }
 
 async function bootPoolPlugin(Context, OpenCodeGoPool, keys) {
-  const root = new Context()
-  const llms = makeMockLlms()
-  root.provide('llm', llms)
-  root.provide('settings', makeMockSettings(() => ({ ...CONFIG, keys })))
-  root.provide('credentials', { resolve: async () => undefined })
-  await root.plugin(OpenCodeGoPool, {})
-  const plugin = root.get('opencodePool')
+  const { root, llms, plugin } = await bootPlugin(Context, OpenCodeGoPool, { keys })
   return { root, llms, plugin }
 }
 

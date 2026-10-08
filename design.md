@@ -3,6 +3,12 @@
 > 版本 v0.1 草案 · 2026-08-16
 > 目标：为 DeepSeek Harness（DSH）提供 OpenCode Go 套餐的**多 Key 池自动切换**与**套餐余额管理卡片**。
 > 本文档中所有 DSH 机制均已对照源码验证（源码位于 `/Users/whitelonng/code/deepseek-harness`，运行版为 DSHCode 0.1.0-rc.7）。
+>
+> **版本适配（2026-10-08，插件 v0.2.0）**：运行目标已升级到 DSH `0.2.1-alpha.1`。下文其余章节是 0.1.0-rc.7 时代的设计记录；与 0.2.1 的差异如下：
+> - **设置 seam**：0.1.x 的 `ctx.settings.register(ns, schema, {base, validate})`（`SettingsProvider`）在 0.2.1 已被 config-editor 支撑的 `SettingsForms` 取代。插件 Config 中卡片可编辑的字段（`keys`/`preemptAtPercent`/`switchAfterConsecutiveFailures`/`modelMode`/`models`）声明为 `volatile`，写入走 `ctx.settings.update/replace(entryId, …, revision)`；Loader 原地更新并广播 `loader/volatile-update`，插件据此重算 KeyPool 与路由，不再重挂插件。`route` 保持普通字段（改它就该重挂）。旧 seam（`register` / `configEditor`）保留为回退路径。
+> - **适配器**：`PiAiAdapter` 的 `auth`（`{credentials, authContext}`）由可选改为必填；插件新增 `createPiAiAuth()`（不写 pi-ai 凭据记录，Key 一律走 `apiKeyEnv` 引用 + credentials seam）。`ResolvedPiAiProviderProfile` 不再读取 `modelCapabilities`。
+> - **依赖**：`peerDependencies` 由 `^0.1.0-rc.5` 提升为 `^0.2.1-alpha.1`（`@deepseek-ai/cordis ~4.0.5-alpha.1`、`schemastery ~3.18.5-alpha.1`、`@earendil-works/pi-ai ^0.87.1`）。
+> - **客户端**：`dsh.client.inject` 中的 `@deepseek-ai/dsh-client-runtime` 在 0.2.1 已不存在，改为实际提供 `slots`/设置页外壳的 `@deepseek-ai/dsh-client-ui-slots`。
 
 ---
 

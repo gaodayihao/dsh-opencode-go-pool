@@ -4,9 +4,11 @@
  * One class-based Cordis plugin that also exposes the `opencodePool` Typert
  * Remote (strict-mode dispatch driven by `typert.host.js`):
  *
- *   1. Registers the `opencode-go-pool` settings namespace (schema + entry
- *      config as the base layer); the card writes keys through `putKeys`
- *      with the settings seam's revision fencing.
+ *   1. Keeps the `opencode-go-pool` settings section (the plugin's own Config
+ *      schema; its volatile fields are the editable ones) and writes card
+ *      edits through the running DSH settings service under the entry id, with
+ *      the seam's revision fencing. On DSH 0.2.1 that write lands in place and
+ *      never remounts the plugin.
  *   2. Maintains the KeyPool state machine, persisted to
  *      `$DSH_HOME/opencode-go-pool.state.json`.
  *   3. Owns the provider route (default `opencode-go`, taking over the
@@ -23,9 +25,13 @@
  * @module dsh-opencode-go-pool
  */
 
+import { access } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 import z from '@deepseek-ai/schemastery'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
@@ -78,16 +84,23 @@ const keyEntry = z.object({
 })
 
 export const Config = z.object({
+  // `route` is ordinary (non-volatile): switching it re-registers the adapter
+  // and remounts the plugin, which is exactly what the restart-scoped
+  // registration state below assumes.
   route: z.union([DEFAULT_ROUTE, ALT_ROUTE]).default(DEFAULT_ROUTE),
-  keys: z.array(keyEntry).default([]),
-  preemptAtPercent: z.number().min(0).max(100).default(100),
+  // Everything the card edits is volatile: DSH 0.2.1's settings service is the
+  // config-editor backed forms service, and only volatile fields are editable
+  // without remounting the plugin. A key or model-selection change therefore
+  // reaches the running pool through the loader's in-place update.
+  keys: z.array(keyEntry).default([]).volatile(),
+  preemptAtPercent: z.number().min(0).max(100).default(100).volatile(),
   // Consecutive non-quota failures (rate limit / server / timeout) after
   // which the pool rotates away from a key; 0 disables the rule.
-  switchAfterConsecutiveFailures: z.number().min(0).max(20).default(0),
+  switchAfterConsecutiveFailures: z.number().min(0).max(20).default(0).volatile(),
   // Which models the pool route exposes. 'all' follows the official catalog
   // (new models appear automatically); 'custom' exposes exactly `models`.
-  modelMode: z.union(['all', 'custom']).default('all'),
-  models: z.array(z.string()).default([]),
+  modelMode: z.union(['all', 'custom']).default('all').volatile(),
+  models: z.array(z.string()).default([]).volatile(),
   usageBaseUrl: z.string().default(DEFAULT_USAGE_BASE_URL),
   modelsBaseUrl: z.string().default(DEFAULT_MODELS_BASE_URL),
   usageRefreshMs: z.number().min(5000).max(300000).default(DEFAULT_USAGE_REFRESH_MS),
@@ -118,31 +131,63 @@ function plainConfig(value) {
   ]))
 }
 
+/** The namespace a settings write targets: the running plugin's own entry id. */
+function settingsNamespace(ctx, entry) {
+  return entry?.options?.id ?? entry?.id ?? ctx.fiber?.entry?.options?.id ?? ctx.fiber?.entry?.id ?? NS
+}
+
 /**
  * Adapt the settings scope across DSH SDK generations.
  *
- * Newer SDKs expose SettingsProvider.register(). DSH 0.1.7 has no such method
- * but does expose the config-editor service, which is read inside an
- * inject(['configEditor']) callback (direct property access throws without
- * inject). Either way the scope is restart-scoped: a profile-patch change
- * reloads the plugin, so there is no live watch to bind here.
+ * DSH 0.2.1 replaced the registered-namespace SettingsProvider with the
+ * config-editor backed SettingsForms service: the plugin's own Config schema is
+ * the form (its volatile fields are the editable ones) and writes go through
+ * `update`/`replace` under the running entry id. `get` always re-reads the live
+ * config refs, and `watch` binds the loader's in-place volatile update, so a
+ * card write reaches the running pool without a remount.
+ *
+ * DSH 0.1.8–0.1.x expose SettingsProvider.register(), whose scope owns its own
+ * persistence; it is used when present. The oldest surface exposes only the
+ * config editor, which is read inside an inject(['configEditor']) callback
+ * (direct property access throws without inject).
  */
 export function createSettingsScope(ctx, initialConfig, entry, editor) {
+  const readLive = () => ({
+    ...FALLBACK_CONFIG,
+    ...plainConfig(initialConfig),
+    ...plainConfig(ctx.fiber?.config),
+  })
+
+  if (typeof ctx.settings?.update === 'function' && typeof ctx.settings?.replace === 'function') {
+    const ns = settingsNamespace(ctx, entry)
+    return {
+      get: readLive,
+      // The loader applies a volatile write in place and announces the changed
+      // paths on this plugin's own context; that event is the live watch.
+      watch: (listener) => {
+        const off = ctx.on?.('loader/volatile-update', () => listener())
+        return () => { if (typeof off === 'function') off() }
+      },
+      update: async (patch) => { await ctx.settings.update(ns, patch) },
+      replace: async (section) => { await ctx.settings.replace(ns, section) },
+    }
+  }
+
   if (typeof ctx.settings?.register === 'function') {
     return ctx.settings.register(NS, Config, {
       base: initialConfig ?? {},
       validate: validateSection,
     })
   }
+
   const activeEditor = editor ?? ctx.configEditor
   if (typeof activeEditor?.edit !== 'function') {
     throw new Error('opencode-go-pool: no compatible settings scope is available')
   }
 
   const activeEntry = entry ?? ctx.fiber?.entry ?? { id: NS, name: 'dsh-opencode-go-pool' }
-  const resolved = () => ({ ...FALLBACK_CONFIG, ...(initialConfig ?? {}), ...plainConfig(ctx.fiber?.config) })
   return {
-    get: resolved,
+    get: readLive,
     // DSH 0.1.7 reloads the plugin on a profile-patch change; the scope is
     // intentionally restart-scoped and owns no live listener.
     watch: () => () => {},
@@ -202,16 +247,70 @@ export function buildProfile(route, dynamicDescriptors) {
     retryPolicy: resolveRetryPolicy(undefined, 'opencode-go-pool.catalog.retryPolicy'),
     piProvider: provider,
     configuredMaxTokens: new Map(),
-    // llm-pi-ai 0.1.7's PiAiAdapter.modelOf() reads profile.modelErrors before
-    // it resolves any model, so a profile without this map fails every
+    // PiAiAdapter.modelOf() reads profile.modelErrors before it resolves any
+    // model, so a profile without this map fails every
     // resolveModel/listModels-info/stream with "Cannot read properties of
     // undefined (reading 'get')" — the catalog route declares no per-model
-    // failures, exactly as config.ts resolves a catalog with none.
+    // failures, exactly as llm-pi-ai's own config resolution produces for a
+    // catalog with none.
     modelErrors: new Map(),
-    // Newer llm-pi-ai builds read modelCapabilities in listModels; a catalog
-    // route with no configured overrides declares none, so an empty map is
-    // the exact contract (capabilityInfo() returns no claims).
-    modelCapabilities: new Map(),
+  }
+}
+
+/**
+ * The pi-ai auth injection the installed PiAiAdapter requires.
+ *
+ * 0.2.1 made `auth` a mandatory adapter option: a collection built without it
+ * silently gets pi-ai's in-memory default store, which is empty at every boot
+ * and discarded on every configuration change. This plugin hands every request
+ * an explicit key resolved from the harness credentials seam, so no pi-ai
+ * credential record is ever written or read here; the ambient context still
+ * answers provider-native discovery (process environment, `~/.aws/credentials`
+ * and friends) the way llm-pi-ai's own injection does.
+ * @param ctx - the plugin context carrying the credentials seam.
+ * @returns the `{ credentials, authContext }` pair to hand PiAiAdapter.
+ */
+export function createPiAiAuth(ctx) {
+  return {
+    credentials: {
+      // Reads answer "nothing stored": this adapter family addresses keys by
+      // credential reference, never by pi-ai's own record key.
+      async read() { return undefined },
+      async list() { return [] },
+      async modify(providerId) {
+        throw new LlmError(
+          `opencode-go-pool: pi-ai stores no credential record for route "${providerId}";`
+          + ' name an apiKeyEnv in the key list and store the secret through the credentials seam instead',
+          'NO_CREDENTIAL_STORE',
+        )
+      },
+      async delete() {},
+    },
+    authContext: {
+      async env(name) {
+        // A provider's ambient discovery asks about arbitrary names; only one
+        // inside the reference grammar can have been stored, and asking the
+        // seam about anything else would throw instead of answering "not set".
+        if (isCredentialRefName(name)) {
+          const hit = await ctx.get('credentials')?.resolve(credentialRef(name))
+          if (hit !== undefined && hit.value.length > 0) return hit.value
+        }
+        return process.env[name]
+      },
+      async fileExists(path) {
+        const expanded = path.startsWith('~/') || path === '~'
+          ? join(homedir(), path.slice(1).replace(/^\//, ''))
+          : path
+        try {
+          await access(expanded)
+          return true
+        } catch {
+          // Absent, unreadable, or a broken symlink: every one of which means
+          // this ambient credential source cannot be used.
+          return false
+        }
+      },
+    },
   }
 }
 
@@ -373,6 +472,8 @@ export class OpenCodeGoPool extends TypertRemoteService {
       reviveThresholdPercent: REVIVE_THRESHOLD_PERCENT,
     })
     this.usageCache = new UsageCache({ ttlMs: USAGE_CACHE_TTL_MS })
+    // The one auth injection every PiAiAdapter this plugin builds shares.
+    this.piAiAuth = createPiAiAuth(ctx)
     // Models pulled from the official models endpoint (id → {id, name}).
     // Loaded from a cache file so a fetched lineup survives restarts.
     this.dynamicModels = new Map(
@@ -403,7 +504,7 @@ export class OpenCodeGoPool extends TypertRemoteService {
         this.logger?.warn?.(`[opencode-go-pool] settings unavailable: ${this.settingsError}`)
       }
     }
-    if (typeof ctx.settings?.register === 'function') {
+    if (typeof ctx.settings?.register === 'function' || typeof ctx.settings?.update === 'function') {
       bindScope()
     } else {
       try {
@@ -436,6 +537,7 @@ export class OpenCodeGoPool extends TypertRemoteService {
         resolveApiKey: async () => {
           throw new Error('opencode-go-pool: the catalog adapter never resolves keys')
         },
+        auth: this.piAiAuth,
         resolveAttachments: () => this.ctx.get('attachments'),
       })
     }
@@ -520,6 +622,7 @@ export class OpenCodeGoPool extends TypertRemoteService {
     return new PiAiAdapter({
       profiles: () => this.profileMap,
       resolveApiKey: () => this.resolveKeyValue(entry),
+      auth: this.piAiAuth,
       resolveAttachments: () => this.ctx.get('attachments'),
     })
   }
