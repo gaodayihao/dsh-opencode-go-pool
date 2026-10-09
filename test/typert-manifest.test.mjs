@@ -18,7 +18,11 @@ test('the host manifest passes the real typert-loader validation', async (t) => 
   // Throws with a package-named message on any defect.
   const validated = validateTypertManifest('dsh-opencode-go-pool', TYPERT)
   assert.equal(validated.package, 'dsh-opencode-go-pool')
-  assert.equal(validated.invocations.length, 9)
+  assert.equal(validated.invocations.length, 10)
+  assert.deepEqual(
+    validated.invocations.map(inv => inv.method).sort(),
+    ['clearInvalid', 'putConfig', 'putKeySecret', 'putKeys', 'refreshModels', 'setActive', 'setDisabled', 'status', 'takeOverState', 'usage'],
+  )
   for (const inv of validated.invocations) {
     assert.equal(inv.result.mode, 'strict', `${inv.method} result must be strict`)
   }

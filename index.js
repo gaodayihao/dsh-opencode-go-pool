@@ -36,6 +36,7 @@ import { credentialRef, isCredentialRefName } from '@deepseek-ai/dsh-credentials
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import {
   assertUsableApiKey,
+  EMPTY_RESPONSE_CODE,
   INVALID_CREDENTIAL_CODE,
   LlmAdapter,
   LlmError,
@@ -45,6 +46,14 @@ import {
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { opencodeGoProvider } from '@earendil-works/pi-ai/providers/opencode-go'
 import { AUTH_CODE, KeyPool, assertKeyList } from './pool.js'
+import {
+  DEFAULT_TRANSPORT_MAX_RETRIES,
+  MAX_TRANSPORT_MAX_RETRIES,
+  TRANSPORT_FAILURE_CODE,
+  TransportBudget,
+  transportBudgetMessage,
+  transportResetAction,
+} from './transport.js'
 import { fetchUsage, UsageCache } from './usage.js'
 import {
   dynamicModelDescriptor,
@@ -67,6 +76,16 @@ const DEFAULT_TIMEOUT_MS = 15000
 const USAGE_CACHE_TTL_MS = 15000
 const REVIVE_THRESHOLD_PERCENT = 98
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000
+// Wait for the provider's first byte. The upstream route withholds response
+// headers until the model emits its first token, so this is deliberately the
+// generous end of the scale; the same 300 s the official OpenCode CLI uses.
+const DEFAULT_REQUEST_TIMEOUT_MS = 300000
+// A stream that ends without a terminal event: content had already reached the
+// caller, so the generation was truncated rather than completed.
+const STREAM_CLOSED_CODE = 'STREAM_CLOSED'
+// Card-editable bound for both timeouts (one hour). Well inside the harness's
+// own timer ceiling, and past anything a model request legitimately needs.
+const MAX_EDITABLE_TIMEOUT_MS = 3600000
 // Adapter-owned image budgets llm-pi-ai resolves into every profile; the
 // hand-built catalog profile below has to carry them too (same values as
 // llm-pi-ai's own resolved defaults).
@@ -74,8 +93,17 @@ const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
 const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
 const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
-/** The default bounded transient-retry code set, plus quota for pool rotation. */
-const BASE_RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT']
+// The default bounded transient-retry code set, plus quota for pool rotation.
+// TRANSPORT is deliberately ABSENT: a connection that cannot be established is
+// bounded by `transportMaxRetries` through the agent/request-error listener in
+// the plugin (see ./transport.js), because this policy is captured once per
+// route and a transport failure answered from here would inherit the much
+// longer quota window.
+//
+// STREAM_CLOSED is the mirror image and IS listed: a stream that ends
+// mid-generation is exactly what a retry fixes, and it must never end the turn
+// on a dead connection.
+const BASE_RETRYABLE_CODES = ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', STREAM_CLOSED_CODE]
 
 const keyEntry = z.object({
   id: z.string(),
@@ -101,6 +129,16 @@ export const Config = z.object({
   // (new models appear automatically); 'custom' exposes exactly `models`.
   modelMode: z.union(['all', 'custom']).default('all').volatile(),
   models: z.array(z.string()).default([]).volatile(),
+  // Advanced network tuning. All three are volatile because the card writes
+  // them through the settings forms service: a path that does not lie beneath a
+  // marked node is REFUSED by the loader, so an unmarked field would render as
+  // a control the page could never commit.
+  requestTimeoutMs: z.number().min(1000).max(MAX_EDITABLE_TIMEOUT_MS).default(DEFAULT_REQUEST_TIMEOUT_MS).volatile(),
+  streamIdleTimeoutMs: z.number().min(1000).max(MAX_EDITABLE_TIMEOUT_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS).volatile(),
+  transportMaxRetries: z.number().min(0).max(MAX_TRANSPORT_MAX_RETRIES).default(DEFAULT_TRANSPORT_MAX_RETRIES).volatile(),
+  // The sidebar quota card is opt-in: a fresh install shows no quota surface in
+  // the sidebar and runs no background poll.
+  showSidebarQuota: z.boolean().default(false).volatile(),
   usageBaseUrl: z.string().default(DEFAULT_USAGE_BASE_URL),
   modelsBaseUrl: z.string().default(DEFAULT_MODELS_BASE_URL),
   usageRefreshMs: z.number().min(5000).max(300000).default(DEFAULT_USAGE_REFRESH_MS),
@@ -115,6 +153,10 @@ const FALLBACK_CONFIG = Object.freeze({
   switchAfterConsecutiveFailures: 0,
   modelMode: 'all',
   models: [],
+  requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+  streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  transportMaxRetries: DEFAULT_TRANSPORT_MAX_RETRIES,
+  showSidebarQuota: false,
   usageBaseUrl: DEFAULT_USAGE_BASE_URL,
   modelsBaseUrl: DEFAULT_MODELS_BASE_URL,
   usageRefreshMs: DEFAULT_USAGE_REFRESH_MS,
@@ -224,9 +266,10 @@ function validateSection(value) {
  * Config, and this plugin owns the route directly instead.
  * @param route - provider route id (e.g. opencode-go).
  * @param dynamicDescriptors - `(route) => descriptors` for fetched models.
+ * @param tuning - the two card-editable network timeouts, in milliseconds.
  * @returns the profile llm-pi-ai serves this route from.
  */
-export function buildProfile(route, dynamicDescriptors) {
+export function buildProfile(route, dynamicDescriptors, tuning = {}) {
   const upstream = opencodeGoProvider()
   if (upstream.id !== route) upstream.id = route
   const provider = {
@@ -240,7 +283,13 @@ export function buildProfile(route, dynamicDescriptors) {
   return {
     provider: route,
     displayName: DISPLAY_NAME,
-    streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    // `timeoutMs` is pi-ai's own request/SDK timeout (the wait for the first
+    // response byte); `streamIdleTimeoutMs` is the harness adapter's watchdog
+    // for a stream that stalls mid-generation. Both are genuinely applied —
+    // PiAiAdapter copies `timeoutMs` into pi-ai's stream options and wraps the
+    // stream in `idleWatchdog(..., streamIdleTimeoutMs)`.
+    timeoutMs: tuning.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    streamIdleTimeoutMs: tuning.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     maxRequestImageBytes: DEFAULT_MAX_REQUEST_IMAGE_BYTES,
     requestImagePixelBudget: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
     requestImageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
@@ -319,6 +368,37 @@ function dryPoolFinish(message) {
   return {
     type: 'finish',
     reason: { kind: 'error', failure: { code: QUOTA_EXCEEDED_CODE, message } },
+  }
+}
+
+/**
+ * The finish for a stream that ended without a terminal event.
+ *
+ * The distinction matters twice over. A cut BEFORE anything was emitted is an
+ * empty response the retrier can simply re-issue; a cut after content has
+ * already reached the caller is a truncated generation, which must not be
+ * reported as a completed turn. Both ride retryable codes on this route, so the
+ * harness re-runs the step instead of ending the turn on a dead connection —
+ * the failure mode a mid-generation EOF produces on any provider.
+ *
+ * @param {boolean} emitted - whether any content chunk reached the caller.
+ */
+function streamCutFinish(emitted) {
+  return {
+    type: 'finish',
+    reason: {
+      kind: 'error',
+      failure: emitted
+        ? {
+            code: STREAM_CLOSED_CODE,
+            message: 'opencode-go: the response ended mid-generation without a finish event —'
+              + ' the connection was closed before the model stopped; retry to re-issue the request',
+          }
+        : {
+            code: EMPTY_RESPONSE_CODE,
+            message: 'opencode-go: the provider returned no response body — retry to re-issue the request',
+          },
+    },
   }
 }
 
@@ -443,7 +523,12 @@ class OpenCodeGoPoolAdapter extends LlmAdapter {
         yield finish
         return
       }
-      // Degenerate inner adapter that ended without a terminal finish.
+      // The inner adapter ended with no terminal finish chunk: a clean EOF in
+      // place of one. Reporting that as a completed turn would hand the caller a
+      // half-finished step, so it is surfaced as a failure instead — and both
+      // codes are retryable on this route, which is what turns a cut connection
+      // into an automatic re-issue of the step rather than a dead turn.
+      yield streamCutFinish(emitted)
       return
     }
   }
@@ -472,6 +557,15 @@ export class OpenCodeGoPool extends TypertRemoteService {
       reviveThresholdPercent: REVIVE_THRESHOLD_PERCENT,
     })
     this.usageCache = new UsageCache({ ttlMs: USAGE_CACHE_TTL_MS })
+    // The last COMPLETED usage outcome per key, success or failure. This is what
+    // `status()` reads, so painting the page is a synchronous map lookup and
+    // never waits on a network round trip; `usage()` is what actually fetches.
+    this.usageResults = new Map()
+    // In-flight background usage refresh (dedupes the poll-driven prefetch).
+    this.usageInFlight = null
+    // Per-request TRANSPORT retry budget (see ./transport.js).
+    this.transportBudget = new TransportBudget()
+    this.transportSessions = new WeakMap()
     // The one auth injection every PiAiAdapter this plugin builds shares.
     this.piAiAuth = createPiAiAuth(ctx)
     // Models pulled from the official models endpoint (id → {id, name}).
@@ -483,6 +577,7 @@ export class OpenCodeGoPool extends TypertRemoteService {
     this.fetchModelsImpl = undefined
 
     this.profileRoute = null
+    this.profileTuning = null
     this.profileMap = null
     this.innerCatalog = null
     this.poolAdapter = null
@@ -518,7 +613,66 @@ export class OpenCodeGoPool extends TypertRemoteService {
     this.offAdaptersUpdated = ctx.on('llm/adapters-updated', () => {
       if (this.servingRoute === null) this.tryRegister()
     })
+    this.installTransportBudget(ctx)
     this.tryRegister()
+  }
+
+  /**
+   * Bound `TRANSPORT` failures to their own per-request budget.
+   *
+   * The route policy deliberately omits `TRANSPORT` (see BASE_RETRYABLE_CODES):
+   * it is captured once per route and shares one attempt window across every
+   * code in it, and that window has to stay generous for a genuinely spent
+   * quota window. Connections get this budget instead — `transportMaxRetries`
+   * automatic retries per model request, answered with the harness's own retry
+   * cadence (the listener delegates to the official retrier's `next()` while
+   * the budget lasts) and then surfaced with a diagnosis naming the real cause.
+   *
+   * The listener only acts while THIS plugin actually serves the route, so a
+   * dormant deployment (the route still owned by llm-pi-ai) keeps its own
+   * transport behavior untouched.
+   */
+  installTransportBudget(ctx) {
+    const serves = provider => this.servingRoute !== null && provider === this.servingRoute
+    ctx.on('agent/request-error', async ({ agent, provider, failure, signal }, next) => {
+      // Checked BEFORE the budget: a cancelled turn is the user's own stop, so
+      // it must neither be answered with a retry nor consume the slot a later
+      // live failure needs.
+      if (signal?.aborted || !serves(provider)) return next()
+      const session = agent?.session
+      if (session && typeof session === 'object') this.transportSessions.set(session, agent)
+      const budget = this.transportMaxRetries()
+      const decision = this.transportBudget.absorb(agent, failure?.code, budget)
+      if (decision === 'ignored') return next()
+      if (decision === 'retry') return { kind: 'retry' }
+      this.logger?.warn?.(`[opencode-go-pool] transport retry budget exhausted for "${provider}" after ${budget}`)
+      throw new Error(transportBudgetMessage(failure?.message ?? 'transport failure', budget))
+    })
+    // Reset the budget at each new STEP — one step is exactly one model request
+    // — so the cap stays per logical request and the next step of the same turn
+    // gets its own grace.
+    ctx.on('session/event', (session, event) => {
+      const action = transportResetAction(event?.type)
+      if (action === 'forget') {
+        this.transportSessions.delete(session)
+        return
+      }
+      if (action !== 'reset') return
+      const agent = this.transportSessions.get(session)
+      if (agent !== undefined) this.transportBudget.reset(agent)
+    })
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'idle') this.transportBudget.reset(agent)
+    })
+  }
+
+  /** The live transport-retry budget, tolerant of pre-feature config docs. */
+  transportMaxRetries() {
+    const value = this.current().transportMaxRetries
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      return DEFAULT_TRANSPORT_MAX_RETRIES
+    }
+    return Math.min(Math.trunc(value), MAX_TRANSPORT_MAX_RETRIES)
   }
 
   // ---- configuration & registration ---------------------------------------
@@ -529,9 +683,19 @@ export class OpenCodeGoPool extends TypertRemoteService {
     this.pool.setConsecutiveThreshold(cfg.switchAfterConsecutiveFailures)
     this.pool.syncKeys(cfg.keys)
 
-    if (this.profileRoute !== cfg.route) {
+    // The two network timeouts are baked into the resolved profile (llm-pi-ai
+    // reads them per call from the profile object it was handed), so a tuning
+    // change has to rebuild the profile — and both adapters read this one map,
+    // which makes the new values reach the very next request.
+    const tuning = JSON.stringify([cfg.requestTimeoutMs, cfg.streamIdleTimeoutMs])
+    if (this.profileRoute !== cfg.route || this.profileTuning !== tuning) {
       this.profileRoute = cfg.route
-      this.profileMap = new Map([[cfg.route, buildProfile(cfg.route, route => this.dynamicModelDescriptors(route))]])
+      this.profileTuning = tuning
+      this.profileMap = new Map([[cfg.route, buildProfile(
+        cfg.route,
+        route => this.dynamicModelDescriptors(route),
+        { requestTimeoutMs: cfg.requestTimeoutMs, streamIdleTimeoutMs: cfg.streamIdleTimeoutMs },
+      )]])
       this.innerCatalog = new PiAiAdapter({
         profiles: () => this.profileMap,
         resolveApiKey: async () => {
@@ -732,12 +896,96 @@ export class OpenCodeGoPool extends TypertRemoteService {
     }
   }
 
+  /**
+   * The card's fast surface: pool state, config, catalog and the LAST KNOWN
+   * usage per key. It performs no usage network call at all.
+   *
+   * That split is the whole point. The usage endpoint is per key, each query
+   * carries its own timeout, and a page whose first paint waited for them sat
+   * on "查询中…" for as long as the slowest key took — up to the request budget
+   * per key. Now the section paints from state that is already in memory, each
+   * account card renders whatever the last completed query produced, and the
+   * data arrives through {@link usage}, which the caller asks for separately.
+   *
+   * The method is deliberately PURE: it never fetches, and it never schedules a
+   * fetch. That is what lets a client decide for itself whether a surface needs
+   * the numbers at all — the sidebar quota card, for instance, reads the
+   * `showSidebarQuota` flag from here with no network traffic whatsoever while
+   * it is switched off.
+   */
   async status() {
     const cfg = this.current()
-    const fetchedAt = new Date().toISOString()
     const entries = this.pool.entries()
     const availableModels = await this.listAvailableModels(cfg)
-    const usageResults = await Promise.all(entries.map(async entry => {
+    return {
+      takeover: this.takeoverState(),
+      route: this.servingRoute ?? cfg.route,
+      usageRefreshMs: cfg.usageRefreshMs,
+      preemptAtPercent: cfg.preemptAtPercent,
+      switchAfterConsecutiveFailures: cfg.switchAfterConsecutiveFailures,
+      requestTimeoutMs: cfg.requestTimeoutMs,
+      streamIdleTimeoutMs: cfg.streamIdleTimeoutMs,
+      transportMaxRetries: this.transportMaxRetries(),
+      showSidebarQuota: cfg.showSidebarQuota === true,
+      modelMode: cfg.modelMode ?? 'all',
+      availableModels,
+      activeId: this.pool.activeId,
+      lastSwitch: this.pool.lastSwitch,
+      takeoverHint: this.servingRoute ? null : this.lastTakeoverError,
+      settingsAvailable: this.scope !== null,
+      settingsHint: this.scope !== null ? null : (this.settingsError ?? 'the settings service exposes no writable seam'),
+      usageRefreshing: this.usageInFlight !== null,
+      keys: entries.map(entry => this.keyStatus(entry)),
+    }
+  }
+
+  /** One key's card row, entirely from in-memory state. */
+  keyStatus(entry) {
+    const st = this.pool.stateOf(entry.id)
+    const result = this.usageResults.get(entry.id)
+    return {
+      id: entry.id,
+      label: entry.label,
+      apiKeyEnv: entry.apiKeyEnv,
+      state: st.state,
+      active: entry.id === this.pool.activeId,
+      usage: result?.usage ?? null,
+      usageError: result?.usageError ?? null,
+      fetchedAt: result?.fetchedAt ?? null,
+      usagePending: result === undefined,
+      credentialSet: result?.credentialSet ?? false,
+      lastFailure: st.lastFailure ?? null,
+    }
+  }
+
+  /**
+   * The card's slow surface: query the usage endpoint for every key, in
+   * parallel, one request per key (the cache dedupes and holds each result for
+   * its TTL). Results land in {@link usageResults}, so the next `status()`
+   * already carries them.
+   *
+   * Concurrent callers share one pass — the settings page, the dashboard and
+   * the sidebar card poll on their own clocks.
+   *
+   * @returns the same per-key rows `status()` would now produce.
+   */
+  async usage() {
+    if (this.usageInFlight !== null) return this.usageInFlight
+    const run = this.runUsagePass()
+    this.usageInFlight = run
+    try {
+      return await run
+    } finally {
+      if (this.usageInFlight === run) this.usageInFlight = null
+    }
+  }
+
+  /** One full usage pass over the current key list. */
+  async runUsagePass() {
+    const cfg = this.current()
+    const entries = this.pool.entries()
+    await Promise.all(entries.map(async entry => {
+      const at = new Date().toISOString()
       try {
         const key = await this.resolveKeyValue(entry)
         const usage = await this.usageCache.get(entry.id, () => fetchUsage({
@@ -746,48 +994,31 @@ export class OpenCodeGoPool extends TypertRemoteService {
           timeoutMs: cfg.timeoutMs,
         }))
         this.pool.onUsage(entry.id, usage)
-        return { id: entry.id, usage, usageError: null, fetchedAt, credentialSet: true }
+        this.usageResults.set(entry.id, {
+          usage, usageError: null, fetchedAt: at, credentialSet: true,
+        })
       } catch (error) {
         const code = error && error.code ? error.code : 'network'
-        return {
-          id: entry.id,
+        this.usageResults.set(entry.id, {
           usage: null,
           usageError: code === 'MISSING_CREDENTIAL' ? 'no-api-key' : code,
-          fetchedAt: null,
+          fetchedAt: at,
           credentialSet: code !== 'MISSING_CREDENTIAL',
-        }
+        })
       }
     }))
     return {
-      takeover: this.takeoverState(),
-      route: this.servingRoute ?? cfg.route,
-      usageRefreshMs: cfg.usageRefreshMs,
-      preemptAtPercent: cfg.preemptAtPercent,
-      switchAfterConsecutiveFailures: cfg.switchAfterConsecutiveFailures,
-      modelMode: cfg.modelMode ?? 'all',
-      availableModels,
-      activeId: this.pool.activeId,
-      lastSwitch: this.pool.lastSwitch,
-      takeoverHint: this.servingRoute ? null : this.lastTakeoverError,
-      settingsAvailable: this.scope !== null,
-      settingsHint: this.scope !== null ? null : (this.settingsError ?? 'the settings service exposes no writable seam'),
-      keys: entries.map(entry => {
-        const st = this.pool.stateOf(entry.id)
-        const result = usageResults.find(item => item.id === entry.id)
-        return {
-          id: entry.id,
-          label: entry.label,
-          apiKeyEnv: entry.apiKeyEnv,
-          state: st.state,
-          active: entry.id === this.pool.activeId,
-          usage: (result && result.usage) ?? null,
-          usageError: (result && result.usageError) ?? null,
-          fetchedAt: (result && result.fetchedAt) ?? null,
-          credentialSet: (result && result.credentialSet) ?? false,
-          lastFailure: st.lastFailure ?? null,
-        }
-      }),
+      fetchedAt: new Date().toISOString(),
+      keys: entries.map(entry => this.keyStatus(entry)),
     }
+  }
+
+  /**
+   * Query the usage endpoint for every key now, and answer the current rows.
+   * A public face of {@link usage} for callers that do not speak Typert.
+   */
+  async refreshUsage() {
+    return this.usage()
   }
 
   async setActive(id) {
@@ -815,6 +1046,12 @@ export class OpenCodeGoPool extends TypertRemoteService {
   async putKeys(keys) {
     assertKeyList(keys)
     await this.requireScope().update({ keys })
+    // Forget the last usage outcome of keys that are gone; newly added ones
+    // read as pending until the next usage pass fills them.
+    const live = new Set(keys.map(key => key.id))
+    for (const id of [...this.usageResults.keys()]) {
+      if (!live.has(id)) this.usageResults.delete(id)
+    }
     return true
   }
 
@@ -840,10 +1077,13 @@ export class OpenCodeGoPool extends TypertRemoteService {
     // A freshly supplied secret may repair an invalid-marked key.
     this.pool.clearInvalid(id)
     this.usageCache.invalidate(id)
+    // Drop the last outcome too, so the card shows this key as pending rather
+    // than repeating an error the new credential may have just fixed.
+    this.usageResults.delete(id)
     return true
   }
 
-  /** Update the card-visible pool settings (thresholds only, never keys). */
+  /** Update the card-visible pool settings (thresholds and tuning, never keys). */
   async putConfig(config) {
     if (!config || typeof config !== 'object') throw new Error('putConfig needs an object')
     const patch = {}
@@ -856,6 +1096,25 @@ export class OpenCodeGoPool extends TypertRemoteService {
       const value = Number(config.switchAfterConsecutiveFailures)
       if (!Number.isFinite(value) || value < 0 || value > 20) throw new Error('switchAfterConsecutiveFailures must be 0..20')
       patch.switchAfterConsecutiveFailures = value
+    }
+    for (const field of ['requestTimeoutMs', 'streamIdleTimeoutMs']) {
+      if (config[field] === undefined) continue
+      const value = Number(config[field])
+      if (!Number.isFinite(value) || value < 1000 || value > MAX_EDITABLE_TIMEOUT_MS) {
+        throw new Error(`${field} must be a whole number of milliseconds between 1000 and ${MAX_EDITABLE_TIMEOUT_MS}`)
+      }
+      patch[field] = Math.round(value)
+    }
+    if (config.transportMaxRetries !== undefined) {
+      const value = Number(config.transportMaxRetries)
+      if (!Number.isInteger(value) || value < 0 || value > MAX_TRANSPORT_MAX_RETRIES) {
+        throw new Error(`transportMaxRetries must be an integer 0..${MAX_TRANSPORT_MAX_RETRIES}`)
+      }
+      patch.transportMaxRetries = value
+    }
+    if (config.showSidebarQuota !== undefined) {
+      if (typeof config.showSidebarQuota !== 'boolean') throw new Error('showSidebarQuota must be a boolean')
+      patch.showSidebarQuota = config.showSidebarQuota
     }
     if (config.modelMode !== undefined) {
       if (config.modelMode !== 'all' && config.modelMode !== 'custom') throw new Error('modelMode must be "all" or "custom"')

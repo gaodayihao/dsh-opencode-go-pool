@@ -66,6 +66,23 @@ test('the hand-built profile carries every adapter-owned field', async (t) => {
   assert.ok(ids.includes('brand-new-model'), 'fetched descriptors are appended to the catalog')
 })
 
+test('the two card-editable network timeouts land in the resolved profile', async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { buildProfile } = harness
+
+  // llm-pi-ai hands `profile.timeoutMs` straight to pi-ai's own stream options
+  // and wraps the stream in `idleWatchdog(..., profile.streamIdleTimeoutMs)`, so
+  // these two fields ARE the advanced settings taking effect.
+  const tuned = buildProfile(route, () => [], { requestTimeoutMs: 42000, streamIdleTimeoutMs: 9000 })
+  assert.equal(tuned.timeoutMs, 42000, 'request timeout rides pi-ai request timeout')
+  assert.equal(tuned.streamIdleTimeoutMs, 9000, 'stream idle timeout rides the adapter watchdog')
+
+  const defaults = buildProfile(route, () => [])
+  assert.equal(defaults.timeoutMs, 300000)
+  assert.equal(defaults.streamIdleTimeoutMs, 300000)
+})
+
 test('the installed PiAiAdapter resolves a model from the hand-built profile', async (t) => {
   const harness = await loadProfile(t)
   if (harness === null) return

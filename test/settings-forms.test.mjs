@@ -85,7 +85,11 @@ test('the plugin Config is a valid 0.2.1 settings form of exactly the editable f
     'modelMode',
     'models',
     'preemptAtPercent',
+    'requestTimeoutMs',
+    'showSidebarQuota',
+    'streamIdleTimeoutMs',
     'switchAfterConsecutiveFailures',
+    'transportMaxRetries',
   ], 'exactly the card-editable fields are volatile')
   assert.deepEqual(ours.value, {
     keys: [],
@@ -93,6 +97,10 @@ test('the plugin Config is a valid 0.2.1 settings form of exactly the editable f
     switchAfterConsecutiveFailures: 0,
     modelMode: 'all',
     models: [],
+    requestTimeoutMs: 300000,
+    streamIdleTimeoutMs: 300000,
+    transportMaxRetries: 5,
+    showSidebarQuota: false,
   })
   await root.fiber.dispose()
 })

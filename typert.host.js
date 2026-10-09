@@ -43,6 +43,7 @@ const keyStatusSchema = z.object({
   usage: usageSchema.nullable(),
   usageError: z.string().nullable(),
   fetchedAt: z.string().nullable(),
+  usagePending: z.boolean(),
   credentialSet: z.boolean(),
   lastFailure: lastFailureSchema.nullable(),
 })
@@ -64,12 +65,26 @@ const refreshModelsResultSchema = z.object({
   fetchedAt: z.string(),
 })
 
+/**
+ * The usage pass's own result. Split from `status` on purpose: the usage
+ * endpoint is queried per key with its own timeout, so making the page's first
+ * paint wait for it is what left the section stuck on its loading state.
+ */
+const usageResultSchema = z.object({
+  fetchedAt: z.string(),
+  keys: z.array(keyStatusSchema),
+})
+
 const poolStatusSchema = z.object({
   takeover: z.string(),
   route: z.string(),
   usageRefreshMs: z.number(),
   preemptAtPercent: z.number(),
   switchAfterConsecutiveFailures: z.number(),
+  requestTimeoutMs: z.number(),
+  streamIdleTimeoutMs: z.number(),
+  transportMaxRetries: z.number(),
+  showSidebarQuota: z.boolean(),
   modelMode: z.string(),
   availableModels: z.array(z.object({
     id: z.string(),
@@ -82,6 +97,7 @@ const poolStatusSchema = z.object({
   takeoverHint: z.string().nullable(),
   settingsAvailable: z.boolean(),
   settingsHint: z.string().nullable(),
+  usageRefreshing: z.boolean(),
   keys: z.array(keyStatusSchema),
 })
 
@@ -111,6 +127,7 @@ export const TYPERT = {
   schemas: [],
   invocations: [
     invocation('status', [], strict('dsh-opencode-go-pool#PoolStatus', poolStatusSchema)),
+    invocation('usage', [], strict('dsh-opencode-go-pool#UsageResult', usageResultSchema)),
     invocation('setActive', [
       { name: 'id', wire: 'id', typeSymbol: 'string', schema: z.string() },
     ], strict('boolean', z.boolean())),
@@ -128,6 +145,10 @@ export const TYPERT = {
       { name: 'config', wire: 'config', typeSymbol: 'dsh-opencode-go-pool#PoolConfigPatch', schema: z.object({
         preemptAtPercent: z.number().optional(),
         switchAfterConsecutiveFailures: z.number().optional(),
+        requestTimeoutMs: z.number().optional(),
+        streamIdleTimeoutMs: z.number().optional(),
+        transportMaxRetries: z.number().optional(),
+        showSidebarQuota: z.boolean().optional(),
         modelMode: z.string().optional(),
         models: z.array(z.string()).optional(),
       }) },

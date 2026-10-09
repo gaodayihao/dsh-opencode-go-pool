@@ -439,3 +439,440 @@ test('failover: non-rotation failures keep the key and surface immediately', asy
   assert.equal(plugin.pool.activeId, 'acc-a')
   await root.fiber.dispose()
 })
+
+test('a stream that ends without a finish event is surfaced as a retryable cut', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  // Content reached the caller and then the generator simply ended: that is a
+  // truncated generation, never a completed turn.
+  const { root, llms, plugin } = await bootPoolPlugin(Context, OpenCodeGoPool, TWO_KEYS)
+  plugin.makeAttemptAdapter = () => new FakeInnerAdapter([[
+    { type: 'text-delta', index: 0, text: 'partial answer' },
+  ]])
+  const chunks = []
+  for await (const chunk of llms.adapter.stream(REQUEST)) chunks.push(chunk)
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[1].type, 'finish')
+  assert.equal(chunks[1].reason.kind, 'error')
+  assert.equal(chunks[1].reason.failure.code, 'STREAM_CLOSED')
+  // Both cut codes ride the route policy's whitelist, which is what makes the
+  // harness re-issue the step instead of ending the turn.
+  assert.ok(llms.adapter.providerRetryPolicy('opencode-go').retryableCodes.includes('STREAM_CLOSED'))
+  assert.ok(llms.adapter.providerRetryPolicy('opencode-go').retryableCodes.includes('EMPTY_RESPONSE'))
+  await root.fiber.dispose()
+
+  // Nothing at all came out: an empty response, which the retrier re-issues.
+  const empty = await bootPoolPlugin(Context, OpenCodeGoPool, TWO_KEYS)
+  empty.plugin.makeAttemptAdapter = () => new FakeInnerAdapter([[]])
+  const emptyChunks = []
+  for await (const chunk of empty.llms.adapter.stream(REQUEST)) emptyChunks.push(chunk)
+  assert.equal(emptyChunks.length, 1)
+  assert.equal(emptyChunks[0].reason.failure.code, 'EMPTY_RESPONSE')
+  await empty.root.fiber.dispose()
+})
+
+test('a normal finish is passed through untouched', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const { root, llms, plugin } = await bootPoolPlugin(Context, OpenCodeGoPool, TWO_KEYS)
+  plugin.makeAttemptAdapter = () => new FakeInnerAdapter([successChunks])
+  const chunks = []
+  for await (const chunk of llms.adapter.stream(REQUEST)) chunks.push(chunk)
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
+  await root.fiber.dispose()
+})
+
+// ---------------------------------------------------------------------------
+// status() / usage(): the page's first paint must never wait on the network.
+//
+// The usage endpoint is per key and each query carries its own timeout, so the
+// old single-RPC shape left the settings section on "查询中…" until the slowest
+// key answered. These tests pin the split: `status()` is a synchronous read of
+// state already in memory, `usage()` is the only thing that fetches.
+
+/** Replace globalThis.fetch for one test and always restore it. */
+function stubFetch(t, impl) {
+  const previous = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init })
+    return impl(url, init)
+  }
+  t.after(() => { globalThis.fetch = previous })
+  return calls
+}
+
+const OK_USAGE = {
+  usage: {
+    rolling: { status: 'ok', percent: 12, resetsAt: new Date(Date.now() + 3600_000).toISOString() },
+    weekly: { status: 'ok', percent: 34, resetsAt: null },
+    monthly: { status: 'ok', percent: 56, resetsAt: null },
+  },
+}
+
+const KEYED_CREDENTIALS = { resolve: async ref => ({ value: `sk-${String(ref)}` }) }
+
+test('status() paints without ever touching the usage endpoint', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const calls = stubFetch(t, async () => ({ ok: true, status: 200, json: async () => OK_USAGE }))
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS }, { credentials: KEYED_CREDENTIALS })
+
+  // status() is PURE: it issues no request and schedules none. That is what
+  // lets the sidebar card read the showSidebarQuota flag without any traffic
+  // while it is switched off, and what makes the settings page's first paint
+  // instant regardless of how slow the usage endpoint is.
+  const status = await plugin.status()
+  assert.equal(status.keys.length, 2)
+  for (const key of status.keys) {
+    assert.equal(key.usage, null, 'nothing is invented before the first query lands')
+    assert.equal(key.usagePending, true, 'a key with no completed query reads as pending')
+    assert.equal(key.usageError, null)
+  }
+  assert.equal(status.usageRefreshing, false)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(calls.length, 0, 'status() never fetches')
+
+  // usage() is the only thing that does, and it fills the same rows.
+  const usage = await plugin.usage()
+  assert.equal(calls.length, 2)
+  assert.equal(usage.keys[0].usage.rolling.percent, 12)
+  const after = await plugin.status()
+  assert.equal(after.keys[0].usage.rolling.percent, 12, 'the pass landed in memory')
+  assert.equal(after.keys[0].usagePending, false)
+  await root.fiber.dispose()
+})
+
+test('concurrent usage() callers share one pass', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const calls = stubFetch(t, async () => ({ ok: true, status: 200, json: async () => OK_USAGE }))
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS }, { credentials: KEYED_CREDENTIALS })
+
+  const [first, second] = await Promise.all([plugin.usage(), plugin.usage()])
+  assert.equal(calls.length, 2, 'two keys, one request each — not two passes')
+  assert.deepEqual(first.keys.map(key => key.id), second.keys.map(key => key.id))
+  await root.fiber.dispose()
+})
+
+test('usage() fills the rows and status() then reports them', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const calls = stubFetch(t, async () => ({
+    ok: true,
+    status: 200,
+    json: async () => OK_USAGE,
+  }))
+
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS }, { credentials: KEYED_CREDENTIALS })
+
+  const usage = await plugin.usage()
+  assert.equal(usage.keys.length, 2)
+  for (const key of usage.keys) {
+    assert.equal(key.usagePending, false)
+    assert.equal(key.usage.rolling.percent, 12)
+    assert.equal(key.usage.weekly.percent, 34)
+    assert.equal(key.usage.monthly.percent, 56)
+    assert.equal(key.credentialSet, true)
+    assert.ok(key.fetchedAt, 'the row carries when it was fetched')
+  }
+  assert.equal(calls.length, 2, 'one request per key')
+
+  // The values are held, so the next status() carries them without another call.
+  const status = await plugin.status()
+  assert.equal(status.keys[0].usage.rolling.percent, 12)
+  assert.equal(status.keys[0].usagePending, false)
+  // Recently fetched → the TTL still holds → nothing new is scheduled.
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(calls.length, 2, 'a fresh value is not re-fetched')
+  await root.fiber.dispose()
+})
+
+test('usage() records a per-key failure without losing the other key', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  let seen = 0
+  stubFetch(t, async () => {
+    seen += 1
+    if (seen === 1) return { ok: false, status: 401, json: async () => ({}) }
+    return { ok: true, status: 200, json: async () => OK_USAGE }
+  })
+
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS }, { credentials: KEYED_CREDENTIALS })
+
+  const usage = await plugin.usage()
+  const rejection = usage.keys.find(key => key.usageError === 'unauthorized')
+  const good = usage.keys.find(key => key.usage !== null)
+  assert.ok(rejection, 'the rejected key reports the coded failure')
+  assert.equal(rejection.usage, null)
+  assert.equal(rejection.credentialSet, true, 'a 401 still proves a credential was present')
+  assert.ok(good, 'the other key keeps its numbers')
+  assert.equal(good.usage.rolling.percent, 12)
+  await root.fiber.dispose()
+})
+
+test('a key with no resolvable credential reports no-api-key, not a network error', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const calls = stubFetch(t, async () => ({ ok: true, status: 200, json: async () => OK_USAGE }))
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS }, { credentials: { resolve: async () => undefined } })
+
+  const usage = await plugin.usage()
+  for (const key of usage.keys) {
+    assert.equal(key.usageError, 'no-api-key')
+    assert.equal(key.credentialSet, false)
+  }
+  assert.equal(calls.length, 0, 'a missing credential never reaches the endpoint')
+  await root.fiber.dispose()
+})
+
+// ---------------------------------------------------------------------------
+// The advanced network settings.
+
+test('the route retry policy leaves TRANSPORT to the transport budget', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const { root, llms } = await bootPlugin(Context, OpenCodeGoPool, { keys: TWO_KEYS })
+  const policy = llms.adapter.providerRetryPolicy('opencode-go')
+  assert.equal(policy.mode, 'normal')
+  assert.ok(!policy.retryableCodes.includes('TRANSPORT'),
+    'TRANSPORT must not ride the shared (quota-length) route window')
+  for (const code of ['QUOTA', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'EMPTY_RESPONSE']) {
+    assert.ok(policy.retryableCodes.includes(code), `${code} stays retryable on the route`)
+  }
+  await root.fiber.dispose()
+})
+
+test('the transport budget answers TRANSPORT, then surfaces a diagnosis', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const { root } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS, transportMaxRetries: 2 }, { credentials: KEYED_CREDENTIALS })
+
+  const agent = { session: {} }
+  const payload = {
+    agent,
+    turn: 1,
+    step: 1,
+    provider: 'opencode-go',
+    failure: { code: 'TRANSPORT', message: 'fetch failed' },
+    signal: new AbortController().signal,
+  }
+  const dispatch = () => root.waterfall('agent/request-error', payload, () => Promise.resolve(undefined))
+
+  assert.deepEqual(await dispatch(), { kind: 'retry' }, 'first transport failure retries')
+  assert.deepEqual(await dispatch(), { kind: 'retry' }, 'second transport failure retries')
+  await assert.rejects(dispatch, /HTTPS_PROXY/, 'the third is surfaced with a diagnosis')
+
+  // A new step restores the whole budget: the cap is per model request.
+  root.emit('session/event', agent.session, { type: 'step/start' })
+  assert.deepEqual(await dispatch(), { kind: 'retry' }, 'a new step gets its own grace')
+
+  // A non-transport failure is left to the route policy, budget untouched.
+  const other = { ...payload, failure: { code: 'SERVER', message: 'boom' } }
+  assert.equal(await root.waterfall('agent/request-error', other, () => Promise.resolve('next')), 'next')
+  await root.fiber.dispose()
+})
+
+test('the transport budget ignores a route this plugin does not serve', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const root = new Context()
+  const llms = makeMockLlms()
+  llms.registerAdapter = () => { throw new Error('llm: duplicate adapter for provider "opencode-go"') }
+  const { plugin } = await bootPlugin(Context, OpenCodeGoPool, { transportMaxRetries: 0 }, { root, llms })
+  assert.equal(plugin.takeoverState(), 'waiting', 'the route is owned elsewhere')
+
+  const action = await root.waterfall('agent/request-error', {
+    agent: { session: {} },
+    provider: 'opencode-go',
+    failure: { code: 'TRANSPORT', message: 'fetch failed' },
+    signal: new AbortController().signal,
+  }, () => Promise.resolve('downstream'))
+  assert.equal(action, 'downstream', 'a dormant plugin leaves transport retries alone')
+  await root.fiber.dispose()
+})
+
+test('the transport budget never spends a slot on a cancelled turn', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const { root } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS, transportMaxRetries: 1 }, { credentials: KEYED_CREDENTIALS })
+
+  const controller = new AbortController()
+  controller.abort()
+  const action = await root.waterfall('agent/request-error', {
+    agent: { session: {} },
+    provider: 'opencode-go',
+    failure: { code: 'TRANSPORT', message: 'fetch failed' },
+    signal: controller.signal,
+  }, () => Promise.resolve('downstream'))
+  assert.equal(action, 'downstream', 'the user stop wins before the budget')
+  await root.fiber.dispose()
+})
+
+// The Host validates every business result against its own strict zod schema
+// before it crosses the wire, so a payload the schema rejects is a status call
+// the card can never see. These two parse the REAL return values.
+
+test('the strict wire schemas accept the real status and usage payloads', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const { TYPERT } = await import('../typert.host.js')
+  const schemaFor = method => TYPERT.invocations.find(invocation => invocation.method === method).result.schema
+
+  const calls = stubFetch(t, async () => ({ ok: true, status: 200, json: async () => OK_USAGE }))
+  const { root, plugin } = await bootPlugin(Context, OpenCodeGoPool,
+    { keys: TWO_KEYS }, { credentials: KEYED_CREDENTIALS })
+
+  // Before the first pass: every key pending, no usage, no error.
+  const cold = schemaFor('status').parse(await plugin.status())
+  assert.equal(cold.keys[0].usagePending, true)
+  assert.equal(cold.keys[0].fetchedAt, null)
+  assert.equal(cold.requestTimeoutMs, 300000)
+  assert.equal(cold.transportMaxRetries, 5)
+  assert.equal(cold.showSidebarQuota, false)
+
+  // After it: the values and the fetch time ride the same rows.
+  const usage = schemaFor('usage').parse(await plugin.usage())
+  assert.equal(usage.keys[0].usage.rolling.percent, 12)
+  assert.equal(usage.keys[0].usagePending, false)
+  assert.equal(typeof usage.fetchedAt, 'string')
+
+  const warm = schemaFor('status').parse(await plugin.status())
+  assert.equal(warm.keys[0].usage.weekly.percent, 34)
+  assert.equal(warm.keys[0].usageError, null)
+  assert.equal(typeof warm.keys[0].fetchedAt, 'string')
+
+  // A failure row is part of the same contract. The cache holds the successful
+  // values for its TTL, so it is dropped to make the endpoint answer again.
+  const failing = stubFetch(t, async () => ({ ok: false, status: 401, json: async () => ({}) }))
+  for (const key of TWO_KEYS) plugin.usageCache.invalidate(key.id)
+  await plugin.usage()
+  const failed = schemaFor('status').parse(await plugin.status())
+  assert.equal(failed.keys[0].usageError, 'unauthorized')
+  assert.equal(failed.keys[0].usage, null)
+  assert.equal(failing.length, 2)
+  await root.fiber.dispose()
+})
+
+test('puts the pool behind the route the picked-up profile patch configures', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  // The exact shape a real profile carries in its cordis.patch.yml: an
+  // explicit config block written BEFORE the advanced fields existed, with
+  // non-ASCII labels and hand-written key ids. A schema or pool-validation
+  // regression here would take the whole plugin — and with it the profile —
+  // down on the next start, so the plugin is booted for real with it.
+  const { root, llms, plugin } = await bootPlugin(Context, OpenCodeGoPool, {
+    route: 'opencode-go',
+    usageBaseUrl: 'https://opencode.ai/zen/go/v1/usage',
+    usageRefreshMs: 30000,
+    timeoutMs: 15000,
+    keys: [
+      { id: 'key-muzdpool', label: '小号', apiKeyEnv: 'OPENCODE_GO_KEY_KEY_MUZDPOOL' },
+      { id: 'key-muzds1by', label: '大号', apiKeyEnv: 'OPENCODE_GO_KEY_KEY_MUZDS1BY' },
+    ],
+    preemptAtPercent: 100,
+    switchAfterConsecutiveFailures: 0,
+    modelMode: 'all',
+    models: [],
+  })
+
+  assert.deepEqual(llms.registered[0], ['opencode-go'], 'the route is taken over')
+  assert.equal(plugin.pool.keyCount(), 2)
+  assert.deepEqual(plugin.pool.entries().map(key => key.label), ['小号', '大号'])
+
+  // Fields the profile predates take their defaults rather than reading as
+  // undefined, which is what keeps the advanced controls meaningful.
+  const status = await plugin.status()
+  assert.equal(status.requestTimeoutMs, 300000)
+  assert.equal(status.streamIdleTimeoutMs, 300000)
+  assert.equal(status.transportMaxRetries, 5)
+  assert.equal(status.showSidebarQuota, false)
+  assert.equal(status.keys.length, 2)
+  assert.equal(status.keys[0].label, '小号')
+  assert.equal(status.keys[0].usagePending, true)
+  await root.fiber.dispose()
+})
+
+test('the shipped bundle patch declares the whole default surface', async (t) => {
+  const { readFile } = await import('node:fs/promises')
+  const { fileURLToPath } = await import('node:url')
+  const { dirname, join: joinPath } = await import('node:path')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const patch = await readFile(joinPath(here, '..', 'cordis.patch.yml'), 'utf8')
+  // The bundle patch is what a profile that never edited its config inherits,
+  // so every key the plugin reads has to be named there once.
+  for (const key of [
+    'route', 'keys', 'preemptAtPercent', 'switchAfterConsecutiveFailures',
+    'modelMode', 'models', 'requestTimeoutMs', 'streamIdleTimeoutMs',
+    'transportMaxRetries', 'showSidebarQuota', 'usageBaseUrl', 'usageRefreshMs', 'timeoutMs',
+  ]) {
+    assert.match(patch, new RegExp(`^\\s+${key}:`, 'm'), `the bundle patch declares ${key}`)
+  }
+})
+
+test('putConfig accepts the advanced network settings and refuses nonsense', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  const { root, settings, plugin } = await bootPlugin(Context, OpenCodeGoPool, {})
+  await plugin.putConfig({
+    requestTimeoutMs: 42000,
+    streamIdleTimeoutMs: 9000,
+    transportMaxRetries: 8,
+    showSidebarQuota: true,
+  })
+  assert.deepEqual(settings.writes[0].patch, {
+    requestTimeoutMs: 42000,
+    streamIdleTimeoutMs: 9000,
+    transportMaxRetries: 8,
+    showSidebarQuota: true,
+  })
+  const status = await plugin.status()
+  assert.equal(status.requestTimeoutMs, 42000)
+  assert.equal(status.streamIdleTimeoutMs, 9000)
+  assert.equal(status.transportMaxRetries, 8)
+  assert.equal(status.showSidebarQuota, true)
+
+  await assert.rejects(() => plugin.putConfig({ requestTimeoutMs: 10 }), /requestTimeoutMs/)
+  await assert.rejects(() => plugin.putConfig({ streamIdleTimeoutMs: 99_999_999 }), /streamIdleTimeoutMs/)
+  await assert.rejects(() => plugin.putConfig({ transportMaxRetries: 51 }), /transportMaxRetries/)
+  await assert.rejects(() => plugin.putConfig({ transportMaxRetries: 1.5 }), /transportMaxRetries/)
+  await assert.rejects(() => plugin.putConfig({ showSidebarQuota: 'yes' }), /showSidebarQuota/)
+  assert.equal(settings.writes.length, 1, 'a refused write never reaches the settings seam')
+  await root.fiber.dispose()
+})

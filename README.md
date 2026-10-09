@@ -21,14 +21,16 @@ DeepSeek Harness（DSH）插件：**OpenCode Go 套餐的多 Key 池** —— �
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:whitelonng/dsh-opencode-go-pool
+dsh plugin --profile web add github:gaodayihao/dsh-opencode-go-pool
 ```
 
-安装/升级插件本身需重启 DSH 一次。此后在卡片里增删 Key、改阈值、改模型选择都会**即时生效**：这些字段在 DSH 0.2.1 里是 volatile 配置，Loader 原地更新，不会重挂插件、也不打断进行中的会话。随后：
+纯 ESM、零构建步骤，没有 `prepare`/`build` 脚本，所以 GitHub 直装就是仓库里的文件本身：装完重启 DSH 一次即可（host 半与浏览器 bundle 都在启动时加载）。
 
-1. **迁移**：打开「设置 → 模型」，删除 `opencode-go` 供应商行（本插件会自动接管该路由；未删除时插件保持休眠并在卡片中显示引导）。
-2. **配置 Key**：打开「设置 → OpenCode Go 套餐池」→「Key 管理」，为每个账号添加一行（id 自动生成；label 为显示名；凭据引用填环境变量名，如 `OPENCODE_GO_KEY_A`）。
-3. **填写密钥**：把每个 Key 的明文写入凭据页（设置 → 模型 → 凭据，对应环境变量名），或 `~/.dsh/.credentials.yaml` / 环境变量。**明文 Key 永不进入插件配置、日志或任何 RPC 响应。**
+装好后：
+
+1. **迁移**：打开「设置 → 模型」，删除 `opencode-go` 供应商行（本插件会自动接管该路由；未删除时插件保持休眠，页面标题右侧的徽标会显示「等待接管」并给出引导）。
+2. **添加账户**：打开「设置 → OpenCode Go 套餐池」→「账户」→「添加账户」，填一个显示名（如 `主号`）并粘贴密钥，点「应用」。密钥直接写入 DSH 凭据服务（引用名自动生成为 `OPENCODE_GO_KEY_<ID>`），**不会进入任何设置文档、日志或 RPC 响应**。账户的增删改都是**即时落地**的。
+3. **其余配置**（切号策略、模型选择、侧边栏开关、高级设置）改动后会从页面底部滑出浮动保存条，点「保存」一次性提交；不想留就点「放弃修改」。
 
 ### 手工安装（等价步骤）
 
@@ -40,15 +42,20 @@ dsh plugin --profile web add github:whitelonng/dsh-opencode-go-pool
   config:
     route: opencode-go          # 接管官方路由；冲突时休眠等待接管
     keys: []                    # 初始为空，由卡片管理（也可在此预置）
-    preemptAtPercent: 100       # <100 时，5h 用量达到即主动避让（默认 100：失败才切）
+    preemptAtPercent: 100       # <100 时，5h/每周用量达到即主动避让（默认 100：失败才切）
+    switchAfterConsecutiveFailures: 0
     modelMode: all              # all=暴露全部官方模型；custom=仅暴露 models 列出的模型
     models: []                  # modelMode=custom 时的模型 id 列表（也可在卡片内勾选）
+    requestTimeoutMs: 300000    # 请求超时（等待首个字节），写入 pi-ai 的 timeoutMs
+    streamIdleTimeoutMs: 300000 # 流空闲超时，由适配器的 idleWatchdog 执行
+    transportMaxRetries: 5      # 网络失败（TRANSPORT）每次模型请求的重试预算
+    showSidebarQuota: false     # 侧边栏额度卡片开关
     usageBaseUrl: https://opencode.ai/zen/go/v1/usage
     usageRefreshMs: 30000
-    timeoutMs: 15000
+    timeoutMs: 15000            # 用量/模型接口的请求超时
 ```
 
-并在 profile 的 `package.json` 中声明依赖后重新安装依赖。
+`keys` 之外的所有字段都可以留空（走默认值）；上面这份就是插件自带 bundle patch 的内容。并在 profile 的 `package.json` 中声明依赖后重新安装依赖。
 
 ## 工作原理
 
@@ -104,12 +111,37 @@ Authorization: Bearer <OpenCode Go API Key>
 | `route` | `opencode-go` | 接管官方路由；改为 `opencode-go-pool` 时注册自有路由（与官方并存，模型选择器需手动切换一次） |
 | `keys` | `[]` | Key 列表：`{id, label, apiKeyEnv}`；通常留空由卡片管理 |
 | `preemptAtPercent` | `100` | 5h 滚动用量达到该百分比即主动避让；100 = 仅在失败时切换 |
+| `switchAfterConsecutiveFailures` | `0` | 同一 Key 连续失败 N 次后切号；0 = 关闭 |
 | `modelMode` | `all` | `all`=暴露官方目录全部模型（新模型自动可用）；`custom`=仅暴露 `models` 勾选的模型 |
-| `models` | `[]` | `modelMode=custom` 时的模型 id 列表；卡片内「模型选择」勾选后写入 |
+| `models` | `[]` | `modelMode=custom` 时的模型 id 列表；卡片内「模型」模块勾选后写入 |
+| `requestTimeoutMs` | `300000` | **请求超时**：等待响应首字节的超时，直接写入 pi-ai 的 `timeoutMs`（「高级设置」可改，1–3600 秒） |
+| `streamIdleTimeoutMs` | `300000` | **流空闲超时**：生成流停滞多久视为死连接，写入 profile 的 `streamIdleTimeoutMs`，由适配器的 `idleWatchdog` 执行（「高级设置」可改，1–3600 秒） |
+| `transportMaxRetries` | `5` | **网络失败重试次数**：连接类失败（`TRANSPORT`）每次模型请求的重试预算，0–50（「高级设置」可改） |
+| `showSidebarQuota` | `false` | 在侧边栏底部显示额度卡片；关闭时不发起任何额度查询（「集成与显示」可改） |
 | `usageBaseUrl` | `https://opencode.ai/zen/go/v1/usage` | 用量接口地址 |
 | `modelsBaseUrl` | `https://opencode.ai/zen/go/v1/models` | 「拉取模型」接口地址 |
 | `usageRefreshMs` | `30000` | 卡片轮询间隔（host 侧另有 15s TTL 缓存） |
-| `timeoutMs` | `15000` | 用量请求超时 |
+| `timeoutMs` | `15000` | 用量/模型接口的请求超时（与模型请求的 `requestTimeoutMs` 无关） |
+
+## 界面
+
+设置页标题为「OpenCode Go 套餐池」，侧边栏导航项则为短名「OpenCode Go」（导航栏窄，长名会被截断），并带一枚与同级项同语言的小标记。页面按模块分组（组间一条细分隔线 + 小标题），自上而下：
+
+1. **标题行**：左侧标题与副标题，最右侧一枚接管状态徽标 —— **已接管为绿色**，自有路由 / 等待接管为橙色。等待接管时下方保留一段可操作的提示（告诉你删掉「设置 → 模型」里的 opencode-go 行），其余情况不再占版面；
+2. **账户**：组头右侧是刷新按钮与「更新于 时间」（同一行、居中对齐）。每个凭据一张瘦身卡片 —— 一行标题（状态圆点 · 名称 · 徽章 · 展开箭头）+ 一行紧凑额度条，**左上角的「⋯」菜单**承担全部操作（设为当前使用 / 编辑凭据 / 重命名 / 停用·启用 / 清除失效 / 删除）。编辑凭据就是卡片内联表单，密钥只走凭据服务。卡片下方是「添加账户」、切号策略与最近一次切号；
+3. **模型**：模型范围（全部 / 自定义）+ 拉取模型 + 可勾选清单；
+4. **集成与显示**：侧边栏额度卡片开关；
+5. **高级设置**（默认收起）：请求超时 / 流空闲超时 / 网络失败重试次数。
+
+侧边栏额度卡片打开的是一个居中列的额度面板，逐账户显示三条额度条与重置倒计时。
+
+### 保存：账户即时落地，配置走浮动保存条
+
+页面上**没有**逐模块的保存按钮。**账户的一切改动（新增 / 改名 / 换密钥 / 停用 / 清除失效 / 删除）立即写入**；只有配置类改动（切号策略、模型选择、侧边栏开关、三个网络设置）会进入草稿，此时页面底部滑出一条浮动保存条，提示「有未保存的更改」并提供 **放弃修改 / 保存** 两个动作；数值非法时保存条转为错误色并提示违规，保存按钮不生效。保存成功后保存条变为绿色「已保存」并自动淡出。
+
+### 首屏为什么不再卡在「查询中…」
+
+设置的读取被拆成两个 RPC：`status` 只读 host 内存里的池状态与**上一次**查到的用量，永不发起网络请求；`usage` 才逐 Key 查询官方接口。页面因此立刻成形，各账户卡片在数值回来前显示自己的「查询中…」，而不是整页等待。`status` 保持**无副作用**（不查询、也不触发查询），所以侧边栏额度卡片关闭时可以零流量地读取自己的开关状态。
 
 ## 与其他插件的关系
 
@@ -120,9 +152,9 @@ Authorization: Bearer <OpenCode Go API Key>
 
 纯 ESM，零构建步骤：
 
-- Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`typert.host.js`（RPC 清单）
+- Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（75 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、cordis 烟测 12（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam）、真实服务集成 9（`integration`：真实 `LlmRuntime` 注册表 / `llm.stream` 全链路 / settings 写入契约 / 接管握手）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 3（`profile`）、导入与 Typert 清单 7、客户端 bundle 执行与渲染 9（`client`）。缺少 harness 依赖时相关测试优雅跳过。
+- 测试：`node --test test/*.test.mjs`（111 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、导入与 Typert 清单 7、客户端 bundle 执行与渲染 23（`client`：槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板、store 两段式加载与轮询生命周期）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -140,9 +172,16 @@ MIT
 
 ## 验证记录
 
+**2026-10-09 界面与网络设置改版**：`node --test --test-isolation=none test/*.test.mjs` → 101 项通过、0 跳过（第 102 项 `current-dsh-import` 在本机沙箱下无法 `spawn` 子进程，属环境限制）。本轮改动与对应测试：
+
+- **首屏不再卡住**：`status` 拆成纯内存读取，新增 `usage` RPC 负责逐 Key 查询；`test/smoke.test.mjs` 用计数 fetch 证明 `status()` 零请求、`usage()` 每 Key 一次、并发调用共享一趟，并断言上一次结果会落到内存。
+- **高级设置真实生效**：`requestTimeoutMs`/`streamIdleTimeoutMs` 写进 `buildProfile`（`test/profile.test.mjs` 断言它们落在 `profile.timeoutMs` / `profile.streamIdleTimeoutMs`）；`transportMaxRetries` 由 `transport.js` 的每次请求预算执行，并已从路由 `retryableCodes` 中移除 `TRANSPORT`，`test/smoke.test.mjs` 走真实 cordis waterfall 验证「重试 N 次后抛出诊断」「新 step 重置预算」「取消的回合不消耗预算」「非本插件路由不干预」。
+- **断流可恢复**：适配器在内层流没有结束事件时不再静默返回，而是产出可重试的 `EMPTY_RESPONSE`（未吐内容）或 `STREAM_CLOSED`（已吐内容），两者都在路由白名单内 —— 断线会自动重发该 step，而不是整轮失败。
+- **界面**：`test/client.test.mjs` 实际执行 bundle 并渲染，断言三个槽位（`settings.section` / `main` / `sidebar.footer.action`）注册、四个模块小标题与三条分隔线、「⋯」按钮位于卡片左上角且在名称之前、收起态只有紧凑额度条、侧边栏卡片在开关关闭或状态未知时渲染空、额度面板逐账户三窗口。
+
 **0.2.1-alpha.1 升级验证（2026-10-08）**：`node --test test/*.test.mjs` → 75 项全部通过、0 跳过，跑在 registry 安装的 `0.2.1-alpha.1` 依赖上（`@deepseek-ai/cordis@4.0.5-alpha.1`、`schemastery@3.18.5-alpha.1`、`@earendil-works/pi-ai@0.87.1`）。其中：
 
-- `test/settings-forms.test.mjs` 用**真实** `@deepseek-ai/dsh-settings`（SettingsForms）核对：插件 `Config` 暴露为可编辑表单的字段恰为卡片可编辑的 5 个 volatile 字段，`route` 保持普通字段并被服务拒绝写入；`settings.update(entryId, patch, revision)` 的合并结果、revision 栅栏（`SETTINGS_CONFLICT`）都符合预期。
+- `test/settings-forms.test.mjs` 用**真实** `@deepseek-ai/dsh-settings`（SettingsForms）核对：插件 `Config` 暴露为可编辑表单的字段恰为卡片可编辑的 9 个 volatile 字段，`route` 保持普通字段并被服务拒绝写入；`settings.update(entryId, patch, revision)` 的合并结果、revision 栅栏（`SETTINGS_CONFLICT`）都符合预期。
 - `test/integration.test.mjs` 用**真实** `LlmRuntime` 与 `PiAiAdapter`：注册表 / `llm.stream` 全链路 / 接管握手。
 - `test/profile.test.mjs` 用**真实** `PiAiAdapter` 校验手写 profile 与新增的 `auth` 注入。
 

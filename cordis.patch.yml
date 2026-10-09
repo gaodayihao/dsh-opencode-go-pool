@@ -8,6 +8,10 @@
         switchAfterConsecutiveFailures: 0
         modelMode: all
         models: []
+        requestTimeoutMs: 300000
+        streamIdleTimeoutMs: 300000
+        transportMaxRetries: 5
+        showSidebarQuota: false
         usageBaseUrl: https://opencode.ai/zen/go/v1/usage
         usageRefreshMs: 30000
         timeoutMs: 15000

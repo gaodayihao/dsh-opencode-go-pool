@@ -120,4 +120,33 @@ export class UsageCache {
   invalidate(key) {
     this.entries.delete(key)
   }
+
+  /**
+   * Non-blocking read of the held value — never starts a fetch. The usage RPC
+   * uses this so painting the page never waits on the network; a miss is what
+   * `isStale` answers for.
+   * @param {string} key
+   * @returns {any|undefined} the cached value, or undefined when nothing is held.
+   */
+  peek(key) {
+    const hit = this.entries.get(key)
+    return hit === undefined ? undefined : hit.value
+  }
+
+  /**
+   * Whether this key would hit the network right now: nothing held, or what is
+   * held is past the TTL.
+   * @param {string} key
+   * @returns {boolean}
+   */
+  isStale(key) {
+    const hit = this.entries.get(key)
+    if (hit === undefined) return true
+    return this.now() - hit.at >= this.ttlMs
+  }
+
+  /** Whether a fetch for this key is in flight right now. */
+  isFetching(key) {
+    return this.inflight.has(key)
+  }
 }
