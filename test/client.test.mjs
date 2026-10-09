@@ -978,3 +978,267 @@ test('the stylesheet is installed once and keys its own tag', async (t) => {
     globalThis.document = previousDocument
   }
 })
+
+// ------------------------------------------------------- composer usage chip
+
+/** The projection a session reports while `provider` is its selected one. */
+const selected = provider => () => ({ next: { provider, model: 'deepseek-v4-flash' } })
+
+/** Render the registered chip with one model selection and pool status. */
+function renderChip(module, React, renderToString, status, useProjection) {
+  const chip = module.__test.CHIP_ID
+  const registration = bootClient(module).registrations['conversation.input.right']
+  assert.equal(registration.id, chip)
+  return renderToString(React.createElement(registration.component, {
+    t: key => key,
+    store: stubStore(status),
+    ...(useProjection === undefined ? {} : { useProjection }),
+  }))
+}
+
+/** The chip's own window payload, with per-window percent/status overrides. */
+function chipKey(windows) {
+  const window = (percent, status = 'ok') => ({ status, percent, resetsAt: null })
+  return {
+    ...KEY,
+    usage: {
+      rolling: { ...window(windows.rolling), ...(windows.rollingReset ?? {}) },
+      weekly: window(windows.weekly),
+      monthly: window(windows.monthly),
+    },
+  }
+}
+
+test('the composer chip is registered for the slot rendered left of the model', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const { React, renderToString } = harness
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, React)
+  const { registrations } = bootClient(module)
+
+  // The composer (InputBar) renders `conversation.input.right` immediately
+  // BEFORE `conversation.input.model`, so this seat is what puts the chip to the
+  // left of the model selector.
+  const chip = registrations['conversation.input.right']
+  assert.ok(chip, 'the composer tool row carries the chip')
+  assert.equal(chip.id, module.__test.CHIP_ID)
+  assert.equal(chip.order, 110)
+  assert.equal(chip.locale, module.NS, 'the chip shares the page dictionary')
+  assert.equal(typeof chip.component, 'function')
+
+  const html = renderToString(React.createElement(chip.component, {
+    t: key => key,
+    store: stubStore({ ...POOL_STATUS, keys: [chipKey({ rolling: 9, weekly: 12, monthly: 6 })] }),
+    useProjection: selected('opencode-go'),
+  }))
+  assert.ok(html.includes('ogp-chipWrap'), 'renders the chip wrapper')
+  assert.ok(html.includes('ogp-chipLogo') && html.includes('<svg'), 'the OpenCode Go mark is inlined')
+  assert.ok(html.includes('ogp-chipChevron'), 'the disclosure chevron renders')
+  assert.ok(!html.includes('ogp-chipDetails'), 'the popover stays closed until it is clicked')
+
+  // A profile without a layout service still gets the chip: it is a composer
+  // seat, not a layout one.
+  const { registrations: noLayout } = bootClient(module, { layout: false })
+  assert.ok(noLayout['conversation.input.right'], 'the chip needs no layout service')
+})
+
+test('the chip renders only while the session runs on a pool route', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, harness.React)
+  const status = { ...POOL_STATUS, keys: [KEY] }
+  const render = projection => renderChip(module, harness.React, harness.renderToString, status, projection)
+
+  for (const provider of ['opencode-go', 'opencode-go-pool', 'opencode-go/some-model']) {
+    const html = render(selected(provider))
+    assert.ok(html.includes('ogp-chipWrap'), `${provider} shows the chip`)
+  }
+  // Every other provider's user sees nothing — no OpenCode Go numbers, and no
+  // background quota traffic (the store's poll is only retained while shown).
+  assert.equal(render(selected('deepseek-official')), '', 'another provider hides the chip')
+  assert.equal(render(selected('')), '', 'no selection hides the chip')
+  assert.equal(render(() => ({})), '', 'a session without a projection hides the chip')
+  assert.equal(render(undefined), '', 'a runtime without the session kit hides the chip')
+
+  // A route the user renamed in this plugin's own settings still matches.
+  const custom = { ...status, route: 'my-ocg' }
+  assert.ok(renderChip(module, harness.React, harness.renderToString, custom, selected('my-ocg'))
+    .includes('ogp-chipWrap'))
+  assert.equal(renderChip(module, harness.React, harness.renderToString, custom, selected('my-other')), '')
+})
+
+test('the chip reads out the serving account and escalates its tone', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, harness.React)
+  const render = (keys, provider = 'opencode-go') => renderChip(
+    module, harness.React, harness.renderToString, { ...POOL_STATUS, keys }, selected(provider),
+  )
+
+  const calm = render([chipKey({ rolling: 9, weekly: 12, monthly: 6 })])
+  for (const segment of ['5h 9%', 'wk 12%', 'mo 6%']) {
+    assert.ok(calm.includes(segment), `the chip inlines ${segment}`)
+  }
+  assert.ok(!calm.includes('ogp-chipWarn') && !calm.includes('ogp-chipCrit'),
+    'a healthy account carries no severity colour')
+
+  // The shipped OpenCode Go ramp: 50/60/70 amber steps, 80 red, 90+ red bold.
+  const hot = render([chipKey({ rolling: 95, weekly: 82, monthly: 65 })])
+  assert.ok(hot.includes('ogp-chipCrit90'), '95% is critical')
+  assert.ok(hot.includes('ogp-chipErr80'), '82% is an error tone')
+  assert.ok(hot.includes('ogp-chipWarn60'), '65% is the 60 step')
+  assert.ok(hot.includes('5h 95%') && hot.includes('wk 82%') && hot.includes('mo 65%'))
+
+  // Only the serving account is read out.
+  const twoKeys = render([{ ...KEY, id: 'idle', active: false }, chipKey({ rolling: 44, weekly: 4, monthly: 2 })])
+  assert.ok(twoKeys.includes('5h 44%'))
+})
+
+test('the chip names why it has no numbers', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, harness.React)
+  const render = keys => renderChip(
+    module, harness.React, harness.renderToString, { ...POOL_STATUS, keys }, selected('opencode-go'),
+  )
+
+  assert.ok(render([]).includes('chipUnavailable'), 'an empty pool says usage is unavailable')
+  assert.ok(render([{ ...KEY, usage: null, usagePending: true }]).includes('usagePending'),
+    'the first pass in flight reads as loading')
+  const failed = render([{ ...KEY, usage: null, usagePending: false, usageError: 'unauthorized' }])
+  assert.ok(failed.includes('&lt;err:unauthorized&gt;'), 'a per-key failure is coded on the chip')
+})
+
+test("the chip's popover lists each window with its reset countdown", async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const { React, renderToString } = harness
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, React)
+  const { QuotaChipDetails } = module.__test
+
+  const rows = [
+    {
+      kind: 'rolling',
+      titleKey: 'rolling',
+      windowData: { status: 'ok', percent: 11, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+    },
+    { kind: 'weekly', titleKey: 'weekly', windowData: { status: 'ok', percent: 82, resetsAt: null } },
+    { kind: 'monthly', titleKey: 'monthly', windowData: { status: 'rate-limited', percent: 100, resetsAt: null } },
+  ]
+  const refreshes = []
+  const html = renderToString(React.createElement(QuotaChipDetails, {
+    t: key => key,
+    store: { ...stubStore(null), refresh: () => refreshes.push('refresh') },
+    serving: { label: '主号', fetchedAt: new Date().toISOString() },
+    rows,
+    errorCode: null,
+    pending: false,
+  }))
+
+  assert.ok(html.includes('ogp-chipDetails'), 'the popover renders')
+  for (const kind of ['rolling', 'weekly']) {
+    assert.ok(html.includes(`>${kind}<`), `the ${kind} row carries its full name`)
+  }
+  assert.ok(html.includes('chipRateLimited'), 'a rate-limited window names that state instead')
+  assert.ok(html.includes('11%') && html.includes('82%') && html.includes('100%'), 'each percent renders')
+  assert.ok(html.includes('chipResetsIn'), 'a window with a reset counts it down')
+  assert.ok(html.includes('ogp-chipRowReset'), 'the countdown is its own muted span')
+  // The windows without a reset get no "in 0s" noise.
+  assert.equal((html.match(/ogp-chipRowReset/g) || []).length, 1, 'only the live window counts down')
+  assert.ok(html.includes('chipAccount') && html.includes('主号'), 'the foot names the serving account')
+  assert.ok(html.includes('chipRefresh'), 'the foot offers a manual refresh')
+  assert.ok(html.includes('updatedAt'), 'and stamps the data time')
+  // The usage endpoint reports percent/resetsAt only, so no money row exists.
+  assert.ok(!html.includes('$'), 'no spend or credit row is invented')
+  assert.equal(refreshes.length, 0, 'refreshing waits for the click')
+})
+
+test('the popover explains an empty or failed pass instead of an empty box', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const { React, renderToString } = harness
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, React)
+  const { QuotaChipDetails } = module.__test
+  const render = props => renderToString(React.createElement(QuotaChipDetails, {
+    t: key => key,
+    store: stubStore(null),
+    serving: null,
+    rows: [],
+    errorCode: null,
+    pending: true,
+    ...props,
+  }))
+
+  assert.ok(render({}).includes('usagePending'), 'an in-flight pass reads as loading')
+  assert.ok(render({ pending: false }).includes('chipUnavailable'), 'an empty pass reads as unavailable')
+  const failed = render({ pending: false, errorCode: 'network' })
+  assert.ok(failed.includes('network'), 'the coded failure is spelled out')
+  assert.ok(failed.includes('ogp-chipEmpty'), 'and it never renders an empty popover')
+  // No serving account means no account row, but the foot still stands.
+  assert.ok(!failed.includes('ogp-chipAccount'))
+  assert.ok(failed.includes('chipRefresh'))
+})
+
+test('the chip helpers format durations, countdowns and severities', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, harness.React)
+  const {
+    formatDuration, remainingSec, hasReset, chipSeverity, chipPercentText,
+    providerOfSelection, isPoolProvider, CHIP_WINDOW_SHORT,
+  } = module.__test
+
+  assert.equal(formatDuration(0), '0s')
+  assert.equal(formatDuration(45), '45s')
+  assert.equal(formatDuration(59), '59s')
+  assert.equal(formatDuration(60), '1m')
+  assert.equal(formatDuration(3599), '59m')
+  assert.equal(formatDuration(3600), '1h')
+  assert.equal(formatDuration(3600 + 23 * 60), '1h 23m')
+  assert.equal(formatDuration(86400), '1d')
+  assert.equal(formatDuration(86400 + 6 * 3600), '1d 6h')
+  assert.equal(formatDuration(-5), '0s', 'a negative is clamped, never rendered as-is')
+
+  assert.equal(hasReset(undefined), false)
+  assert.equal(hasReset({ resetsAt: null }), false, 'a window that never opened has no countdown')
+  assert.equal(hasReset({ resetsAt: 'not-a-date' }), false)
+  assert.equal(hasReset({ resetsAt: new Date(Date.now() - 60_000).toISOString() }), false)
+  const soon = remainingSec({ resetsAt: new Date(Date.now() + 90_000).toISOString() })
+  assert.ok(soon >= 89 && soon <= 91, `remainingSec re-derives the countdown (got ${soon})`)
+
+  assert.equal(chipSeverity({ status: 'ok', percent: 9 }), null)
+  assert.equal(chipSeverity({ status: 'ok', percent: 50 }), 'ogp-chipWarn50')
+  assert.equal(chipSeverity({ status: 'ok', percent: 60 }), 'ogp-chipWarn60')
+  assert.equal(chipSeverity({ status: 'ok', percent: 70 }), 'ogp-chipWarn70')
+  assert.equal(chipSeverity({ status: 'ok', percent: 80 }), 'ogp-chipErr80')
+  assert.equal(chipSeverity({ status: 'ok', percent: 90 }), 'ogp-chipCrit90')
+  assert.equal(chipSeverity({ status: 'rate-limited', percent: 10 }), 'ogp-chipCrit90')
+  assert.equal(chipSeverity({ status: 'ok', percent: null }), null)
+
+  assert.equal(chipPercentText(12), '12')
+  assert.equal(chipPercentText(11.4), '11.4')
+  assert.equal(chipPercentText(null), '—')
+
+  assert.deepEqual(CHIP_WINDOW_SHORT, { rolling: '5h', weekly: 'wk', monthly: 'mo' })
+  assert.equal(isPoolProvider('opencode-go', undefined), true)
+  assert.equal(isPoolProvider('opencode-go-pool', undefined), true)
+  assert.equal(isPoolProvider('opencode-go/sub', undefined), true)
+  assert.equal(isPoolProvider('deepseek-official', undefined), false)
+  assert.equal(isPoolProvider(undefined, undefined), false)
+  assert.equal(isPoolProvider('', 'opencode-go'), false)
+  assert.equal(isPoolProvider('my-ocg', 'my-ocg'), true, 'a renamed route matches itself')
+  assert.equal(isPoolProvider('my-ocg', 'other'), false)
+
+  assert.equal(providerOfSelection({ next: { provider: 'a' }, lastUsed: { provider: 'b' } }), 'a')
+  assert.equal(providerOfSelection({ lastUsed: { provider: 'b' } }), 'b')
+  assert.equal(providerOfSelection({ next: { provider: '' } }), undefined)
+  assert.equal(providerOfSelection({}), undefined)
+  assert.equal(providerOfSelection(undefined), undefined)
+})

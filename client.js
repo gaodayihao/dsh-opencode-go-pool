@@ -35,6 +35,8 @@ window.__ModuleLoader__.load({
 
     /** The layout's `MainPanelId` shared by the sidebar card and the panel cell. */
     const PANEL_ID = 'opencode-go-pool-panel';
+    /** The composer chip's slot cell id (see `conversation.input.right`). */
+    const CHIP_ID = 'opencode-go-pool-chip';
     const CSS_ID = 'dsh-opencode-go-pool/opencode-go-pool.css';
     const DEFAULT_POLL_MS = 30000;
     const MAX_TIMEOUT_MS = 3600000;
@@ -184,6 +186,13 @@ window.__ModuleLoader__.load({
       close: '关闭额度面板',
       closeHint: '返回对话（当前会话不受影响）',
       footNoData: '暂无额度数据',
+
+      chipExpand: '展开用量详情',
+      chipCollapse: '收起',
+      chipUnavailable: '用量不可用',
+      chipAccount: '账户',
+      chipRateLimited: '已限流',
+      chipResetsIn: '剩余 {duration}',
     };
 
     const en = {
@@ -327,6 +336,13 @@ window.__ModuleLoader__.load({
       close: 'Close the quota dashboard',
       closeHint: 'Back to the conversation (the current session is untouched)',
       footNoData: 'no usage data yet',
+
+      chipExpand: 'Show usage details',
+      chipCollapse: 'Collapse',
+      chipUnavailable: 'usage unavailable',
+      chipAccount: 'Account',
+      chipRateLimited: 'rate-limited',
+      chipResetsIn: 'resets in {duration}',
     };
 
     const panelZh = {
@@ -580,12 +596,47 @@ window.__ModuleLoader__.load({
 .ogp-railButton:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .ogp-glyph{flex:none;justify-content:center;align-items:center;display:inline-flex;color:var(--dsw-alias-brand-primary)}
 
+/* The composer tool-row chip: a pill left of the model selector, plus the
+   detail popover it opens upward. Geometry is the shipped OpenCode Go chip's;
+   the colours are this plugin's harness aliases, so the popover matches the
+   dashboard it belongs to. */
+.ogp-chipWrap{position:relative;display:inline-flex}
+.ogp-chip{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:24px;margin:0;padding:0 6px 0 8px;border:0;border-radius:999px;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;user-select:none;transition:background-color .12s ease}
+.ogp-chip:hover,.ogp-chipOpen{background:var(--dsw-alias-interactive-bg-hover)}
+.ogp-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.ogp-chipSeg{display:inline-flex;align-items:baseline;gap:3px}
+.ogp-chipSep{opacity:.45}
+.ogp-chipLogo{display:inline-flex;flex:none}
+.ogp-chipChevron{display:inline-flex;flex:none;color:var(--dsw-alias-label-tertiary);transition:transform .12s ease}
+.ogp-chipChevronOpen{transform:rotate(180deg)}
+.ogp-chipMuted{color:var(--dsw-alias-label-tertiary)}
+.ogp-chipWarn50{color:var(--dsw-static-amber-400,#f7ad31)}
+.ogp-chipWarn60{color:var(--dsw-static-amber-500,#f59e0b)}
+.ogp-chipWarn70{color:var(--dsw-static-amber-600,#dd8629)}
+.ogp-chipErr80{color:var(--dsw-alias-state-error-primary)}
+.ogp-chipCrit90{color:var(--dsw-alias-state-error-primary);font-weight:600}
+/* Opens upward from the chip. The chip sits at the right end of the composer
+   row, so the panel anchors its right edge there and grows leftward; a centred
+   popover would run off the window. */
+.ogp-chipDetails{position:absolute;right:0;bottom:calc(100% + 6px);z-index:40;display:flex;flex-direction:column;gap:6px;width:max-content;min-width:240px;max-width:min(92vw,420px);padding:8px 10px;border:.5px solid var(--dsw-alias-border-l3);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-elevation-prominent,0 12px 32px -8px rgba(0,0,0,.24),0 2px 8px rgba(0,0,0,.08));font-size:12px}
+.ogp-chipRow{display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:nowrap}
+.ogp-chipRowLabel{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-secondary);opacity:.9}
+.ogp-chipRowValue{display:inline-flex;align-items:baseline;gap:6px;font-variant-numeric:tabular-nums}
+.ogp-chipRowReset{opacity:.65;font-size:11px;font-variant-numeric:tabular-nums}
+.ogp-chipFoot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:6px;border-top:.5px solid var(--dsw-alias-border-l2);font-size:11px}
+.ogp-chipAccount{overflow:hidden;max-width:170px;color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap}
+.ogp-chipFootRight{display:inline-flex;align-items:center;gap:8px;margin-left:auto}
+.ogp-chipRefresh{flex:none;padding:0;border:0;background:0 0;color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary));font:inherit;font-size:11px;white-space:nowrap;cursor:pointer}
+.ogp-chipRefresh:hover{text-decoration:underline}
+.ogp-chipFetched{opacity:.6;white-space:nowrap;font-variant-numeric:tabular-nums}
+.ogp-chipEmpty{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;max-width:240px;white-space:normal}
+
 /* The settings nav row: the shell hardcodes a gear for unknown section ids, so
    a one-line rule hides it for OUR row only (without :has() the row simply
    shows both icons). */
 button:has(.dsh-ogp-nav-mark) > svg{display:none}
 
-@media (prefers-reduced-motion:reduce){.ogp-chevron,.ogp-toggle::after,.ogp-barFill,.ogp-footFill{transition:none}}
+@media (prefers-reduced-motion:reduce){.ogp-chevron,.ogp-toggle::after,.ogp-barFill,.ogp-footFill,.ogp-chip,.ogp-chipChevron{transition:none}}
 `;
 
     // --------------------------------------------------------------- remote
@@ -2254,6 +2305,339 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
       );
     }
 
+    // -------------------------------------------------- composer usage chip
+
+    // The chip in the composer tool row (`conversation.input.right`, which the
+    // composer renders immediately before the model selector, so the chip reads
+    // as sitting to the left of the model). It is not a second data layer: it
+    // reads the same `createPoolStore` the sidebar card does, so both surfaces
+    // share one poll and one usage pass.
+
+    /** The route this pool takes over by default. */
+    const PRIMARY_ROUTE = 'opencode-go';
+    /** The route it falls back to when it cannot take the primary one. */
+    const ALT_ROUTE = 'opencode-go-pool';
+    /** Inline window labels: short because the chip lives on one composer line. */
+    const CHIP_WINDOW_SHORT = { rolling: '5h', weekly: 'wk', monthly: 'mo' };
+    /** The three windows, in display order, with the copy key of the full name. */
+    const CHIP_WINDOWS = [
+      { kind: 'rolling', titleKey: 'rolling' },
+      { kind: 'weekly', titleKey: 'weekly' },
+      { kind: 'monthly', titleKey: 'monthly' },
+    ];
+    /** Segment separator, matching the shipped OpenCode Go chip. */
+    const CHIP_SEP = '·';
+
+    /** A duration (seconds) compactly: 45s / 23m / 5h 23m / 4d 6h. */
+    function formatDuration(totalSec) {
+      const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
+      if (sec < 60) return `${sec}s`;
+      if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+      if (sec < 86400) {
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        return m > 0 ? `${h}h ${m}m` : `${h}h`;
+      }
+      const d = Math.floor(sec / 86400);
+      const h = Math.floor((sec % 86400) / 3600);
+      return h > 0 ? `${d}d ${h}h` : `${d}d`;
+    }
+
+    /**
+     * Whole seconds until one window resets.
+     *
+     * `resetsAt` is absolute, so re-deriving the countdown keeps the popover
+     * honest for a whole poll interval instead of freezing the number the Host
+     * computed when it answered. A window that has not opened yet reports no
+     * reset (or one already past), which floors to 0.
+     */
+    function remainingSec(windowData) {
+      if (!windowData || typeof windowData.resetsAt !== 'string') return 0;
+      const target = Date.parse(windowData.resetsAt);
+      if (!Number.isFinite(target)) return 0;
+      return Math.max(0, Math.ceil((target - Date.now()) / 1000));
+    }
+
+    /** Whether a window has a reset worth phrasing — "resets in 0s" is noise. */
+    function hasReset(windowData) {
+      return remainingSec(windowData) > 0;
+    }
+
+    /** One window's consumed percent, or null when the pass reported none. */
+    function windowPercent(windowData) {
+      return windowData && typeof windowData.percent === 'number' ? windowData.percent : null;
+    }
+
+    /** The severity class of one window: muted, then escalating warn → err. */
+    function chipSeverity(windowData) {
+      const percent = windowPercent(windowData);
+      if (percent === null) return null;
+      if (windowData.status === 'rate-limited' || percent >= 90) return 'ogp-chipCrit90';
+      if (percent >= 80) return 'ogp-chipErr80';
+      if (percent >= 70) return 'ogp-chipWarn70';
+      if (percent >= 60) return 'ogp-chipWarn60';
+      if (percent >= 50) return 'ogp-chipWarn50';
+      return null;
+    }
+
+    /** A percent for display: keep one decimal, drop a trailing `.0`. */
+    function chipPercentText(percent) {
+      if (percent === null) return '—';
+      return Number.isInteger(percent) ? String(percent) : percent.toFixed(1);
+    }
+
+    /**
+     * The provider of a session's effective model selection.
+     *
+     * `next` is what the next request will use; falling back to `lastUsed`
+     * covers a session that has not selected anything yet but has already run.
+     */
+    function providerOfSelection(value) {
+      const selection = value && (value.next || value.lastUsed);
+      const provider = selection ? selection.provider : undefined;
+      return typeof provider === 'string' && provider.length > 0 ? provider : undefined;
+    }
+
+    /**
+     * Whether a session's provider is one this pool serves.
+     *
+     * The status payload's `route` is consulted first, so a custom route id in
+     * the plugin's own settings keeps working; the two shipped route names are
+     * always accepted, which is what makes the chip appear on the first paint
+     * (before any status read has landed) and while the pool is still dormant
+     * waiting for another plugin to release `opencode-go`.
+     */
+    function isPoolProvider(provider, route) {
+      if (typeof provider !== 'string' || provider === '') return false;
+      return [route, PRIMARY_ROUTE, ALT_ROUTE].some(candidate => (
+        typeof candidate === 'string' && candidate !== ''
+        && (provider === candidate || provider.startsWith(`${candidate}/`))
+      ));
+    }
+
+    /**
+     * Dark mode, read from the theme presenter's body attribute.
+     *
+     * The mark is an inlined two-tone SVG (dark mode paints its own plate), so
+     * the chip has to follow a theme switch made from the settings page without
+     * a reload.
+     */
+    function useDarkMode() {
+      const read = () => (
+        typeof document !== 'undefined' && document.body
+          ? document.body.hasAttribute('data-ds-dark-theme')
+          : false
+      );
+      const [dark, setDark] = React.useState(read);
+      React.useEffect(() => {
+        if (typeof document === 'undefined' || !document.body
+            || typeof MutationObserver === 'undefined') return undefined;
+        const observer = new MutationObserver(() => setDark(read()));
+        observer.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
+        return () => observer.disconnect();
+      }, []);
+      return dark;
+    }
+
+    /** The OpenCode Go mark, inlined so the chip costs no extra asset request. */
+    function OpenCodeGoMark() {
+      const dark = useDarkMode();
+      const base = {
+        className: 'ogp-chipLogo',
+        width: 22,
+        height: 12,
+        viewBox: '0 0 54 30',
+        fill: 'none',
+        xmlns: 'http://www.w3.org/2000/svg',
+        'aria-hidden': 'true',
+      };
+      const path = (key, d, fill) => React.createElement('path', { key, d, fill });
+      if (dark) {
+        return React.createElement('svg', base,
+          React.createElement('rect', { key: 'plate', width: '100%', height: '100%', fill: '#2c2c2e' }),
+          path('o', 'M24 30H0V0H24V6H6V24H18V18H12V12H24V30Z', '#e6edf3'),
+          path('ocut', 'M12 18H18V24H6V12H12V18Z', '#646464'),
+          path('gcut', 'M48 12V24H36V12H48Z', '#646464'),
+          path('g', 'M54 30H30V0H54V30ZM36 24H48V6H36V24Z', '#e6edf3'),
+        );
+      }
+      return React.createElement('svg', base,
+        path('o', 'M24 30H0V0H24V6H6V24H18V18H12V12H24V30Z', '#211E1E'),
+        path('ocut', 'M12 18H18V24H6V12H12V18Z', '#CFCECD'),
+        path('gcut', 'M48 12V24H36V12H48Z', '#CFCECD'),
+        path('g', 'M54 30H30V0H54V30ZM36 24H48V6H36V24Z', '#211E1E'),
+      );
+    }
+
+    /** The composer tool-row entry; see {@link QuotaChipBody} for the chip. */
+    function QuotaChip(props) {
+      // This shell deliberately calls NO hooks, so a runtime whose slot props
+      // carry no session kit (an older Host, or a hand-made unit render) drops
+      // the chip instead of throwing inside the composer.
+      if (typeof props.useProjection !== 'function') return null;
+      return React.createElement(QuotaChipBody, props);
+    }
+
+    /**
+     * The OpenCode Go usage chip.
+     *
+     * It renders nothing unless the session's live model selection is one this
+     * pool serves, and it holds the shared store open while it shows, so the
+     * numbers follow the pool's own refresh interval. Clicking toggles a
+     * popover with the three windows, their reset countdowns and a manual
+     * refresh; a press outside it (or Escape) closes it.
+     */
+    function QuotaChipBody(props) {
+      const { t, store } = props;
+      const selection = props.useProjection('modelSelection');
+      const snapshot = React.useSyncExternalStore(store.subscribe, store.get, store.get);
+      const data = snapshot.data;
+      const visible = isPoolProvider(providerOfSelection(selection), data ? data.route : undefined);
+      const [open, setOpen] = React.useState(false);
+      const wrapRef = React.useRef(null);
+
+      // Hold the shared poll open while the chip is on screen. Off the
+      // opencode-go routes this never runs, so no other provider's user gets
+      // background quota traffic.
+      React.useEffect(() => {
+        if (!visible) return undefined;
+        return store.retain();
+      }, [visible, store]);
+
+      // Leaving the route closes an open popover: the chip is about to unmount
+      // its body anyway, and this keeps the state from reopening stale.
+      React.useEffect(() => {
+        if (!visible) setOpen(false);
+      }, [visible]);
+
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const onPointerDown = (event) => {
+          const target = event.target;
+          if (wrapRef.current && target && !wrapRef.current.contains(target)) setOpen(false);
+        };
+        const onKeyDown = (event) => { if (event.key === 'Escape') setOpen(false); };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+          document.removeEventListener('pointerdown', onPointerDown);
+          document.removeEventListener('keydown', onKeyDown);
+        };
+      }, [open]);
+
+      if (!visible) return null;
+
+      const keys = data && Array.isArray(data.keys) ? data.keys : [];
+      const serving = keys.find(key => key.active) ?? keys[0] ?? null;
+      const usage = (serving && serving.usage) || {};
+      const rows = CHIP_WINDOWS
+        .map(entry => ({ kind: entry.kind, titleKey: entry.titleKey, windowData: usage[entry.kind] ?? null }))
+        .filter(row => row.windowData !== null);
+      const reported = rows.filter(row => windowPercent(row.windowData) !== null);
+      const errorCode = serving ? serving.usageError ?? null : null;
+      const pending = errorCode === null && (data === null
+        || (serving !== null && serving.usagePending === true && reported.length === 0));
+      const title = serving !== null ? `${t('panelTitle')} ${CHIP_SEP} ${serving.label}` : t('panelTitle');
+
+      // One line for the chip: the windows the pass reported, or the reason it
+      // has nothing to show yet.
+      const summary = reported.length > 0
+        ? reported.map(row => React.createElement('span', { className: 'ogp-chipSeg', key: row.kind },
+            React.createElement('span', { className: 'ogp-chipSep' }, ` ${CHIP_SEP} `),
+            React.createElement('span', { className: chipSeverity(row.windowData) ?? undefined },
+              `${CHIP_WINDOW_SHORT[row.kind]} ${chipPercentText(windowPercent(row.windowData))}%`),
+          ))
+        : [React.createElement('span', {
+            className: errorCode !== null ? undefined : 'ogp-chipMuted',
+            key: 'state',
+          }, errorCode !== null ? `<err:${errorCode}>` : pending ? t('usagePending') : t('chipUnavailable'))];
+
+      // The chip itself: mark + the reported windows + the disclosure chevron,
+      // with the popover only while it is open.
+      return React.createElement('span', { className: 'ogp-chipWrap', ref: wrapRef },
+        React.createElement('button', {
+          type: 'button',
+          className: open ? 'ogp-chip ogp-chipOpen' : 'ogp-chip',
+          'aria-label': title,
+          'aria-expanded': open,
+          title: open ? t('chipCollapse') : t('chipExpand'),
+          onClick: () => setOpen(value => !value),
+        },
+          React.createElement(OpenCodeGoMark, null),
+          summary,
+          React.createElement('span', {
+            className: open ? 'ogp-chipChevron ogp-chipChevronOpen' : 'ogp-chipChevron',
+            'aria-hidden': 'true',
+          }, React.createElement('svg', { width: 12, height: 12, viewBox: '0 0 12 12', fill: 'none' },
+            React.createElement('path', {
+              d: 'M3 4.5L6 7.5L9 4.5',
+              stroke: 'currentColor',
+              strokeWidth: 1.5,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+            }))),
+        ),
+        open
+          ? React.createElement(QuotaChipDetails, { t, store, serving, rows, errorCode, pending })
+          : null,
+      );
+    }
+
+    /**
+     * The chip's detail popover: the three windows with their reset countdowns,
+     * then a foot carrying the serving account, a manual refresh and the time of
+     * the data. Split from the chip so it can be rendered (and asserted) on its
+     * own; the chip owns nothing but the open/closed state.
+     *
+     * There is deliberately no spend or credit row: the usage endpoint this
+     * plugin calls (`/zen/go/v1/usage`) reports `status` / `percent` / `resetsAt`
+     * per window and nothing money-denominated, so the panel reports what the
+     * endpoint actually carries.
+     */
+    function QuotaChipDetails(props) {
+      const { t, store, serving, rows, errorCode, pending } = props;
+      const fetchedAt = serving !== null ? clockOf(serving.fetchedAt) : '';
+
+      const body = rows.length > 0
+        ? rows.map(row => {
+            const reset = hasReset(row.windowData)
+              ? t('chipResetsIn').replace('{duration}', formatDuration(remainingSec(row.windowData)))
+              : '';
+            return React.createElement('span', { className: 'ogp-chipRow', key: row.kind },
+              React.createElement('span', { className: 'ogp-chipRowLabel' },
+                row.windowData.status === 'rate-limited' ? t('chipRateLimited') : t(row.titleKey)),
+              React.createElement('span', { className: 'ogp-chipRowValue' },
+                React.createElement('span', { className: chipSeverity(row.windowData) ?? undefined },
+                  `${chipPercentText(windowPercent(row.windowData))}%`),
+                reset === '' ? null : React.createElement('span', { className: 'ogp-chipRowReset' }, reset),
+              ),
+            );
+          })
+        : [React.createElement('span', { className: 'ogp-chipEmpty', key: 'empty' },
+            errorCode !== null ? usageErrorText(errorCode, t)
+              : pending ? t('usagePending') : t('chipUnavailable'))];
+
+      body.push(React.createElement('span', { className: 'ogp-chipFoot', key: 'foot' },
+        serving !== null
+          ? React.createElement('span', { className: 'ogp-chipAccount' },
+              `${t('chipAccount')} ${serving.label}`)
+          : null,
+        React.createElement('span', { className: 'ogp-chipFootRight' },
+          React.createElement('button', {
+            type: 'button',
+            className: 'ogp-chipRefresh',
+            onClick: () => { void store.refresh(); },
+          }, t('refresh')),
+          fetchedAt === ''
+            ? null
+            : React.createElement('span', { className: 'ogp-chipFetched' },
+                `${t('updatedAt')} ${fetchedAt}`),
+        ),
+      ));
+
+      return React.createElement('span', { className: 'ogp-chipDetails' }, body);
+    }
+
     // ----------------------------------------------------------------- apply
 
     function injectCss(id, css) {
@@ -2392,6 +2776,25 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
         console.error('[dsh-opencode-go-pool] could not register the quota panel:', error);
       }
 
+      // The composer chip: `conversation.input.right` is rendered immediately
+      // before `conversation.input.model`, so this lands to the LEFT of the
+      // model selector. It needs no layout gate — it is registered into the
+      // conversation composer, which declares that slot for every session.
+      try {
+        ctx.slots.inject('conversation.input.right', () => ctx.slots.register(
+          {
+            name: 'conversation.input.right',
+            id: CHIP_ID,
+            order: 110,
+            locale: NS,
+            inject: () => ({ t, store }),
+          },
+          QuotaChip,
+        ));
+      } catch (error) {
+        console.error('[dsh-opencode-go-pool] could not register the composer usage chip:', error);
+      }
+
       // The card itself, registered only where a layout can open the panel
       // behind it — a profile without ui-layout never gets a dead button.
       ctx.inject(['layout'], (layoutCtx) => {
@@ -2417,11 +2820,15 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
     exports.inject = inject;
     // Render-path test hooks (unused by the runtime; see test/client.test.mjs).
     exports.__test = {
-      PoolPage, QuotaPanel, QuotaFooterCard, AccountItem, AddAccountPanel, ModelsGroup, AdvancedGroup,
+      PoolPage, QuotaPanel, QuotaFooterCard, QuotaChip, QuotaChipBody, QuotaChipDetails,
+      OpenCodeGoMark,
+      AccountItem, AddAccountPanel, ModelsGroup, AdvancedGroup,
       IntegrationsGroup, AccountsGroup, SaveBar, KebabMenu, UsageWindow, MiniMeter, Ring,
       createPoolStore, mergeUsage, barPercent, barTone, formatReset, usageErrorText, noticeText,
       statusDotClass, stateBadge, takeoverBadge, stagedConfig, readStaged, stagedValid, stagedPatch,
-      msToSecondsText, secondsTextToMs, unwrapRemote, TYPERT_REMOTE, PANEL_ID, CSS_ID,
+      msToSecondsText, secondsTextToMs, unwrapRemote, TYPERT_REMOTE, PANEL_ID, CHIP_ID, CSS_ID,
+      formatDuration, remainingSec, hasReset, windowPercent, chipSeverity, chipPercentText,
+      providerOfSelection, isPoolProvider, CHIP_WINDOW_SHORT, CHIP_SEP,
     };
     return module.exports;
   },

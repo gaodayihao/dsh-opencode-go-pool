@@ -17,6 +17,7 @@ DeepSeek Harness（DSH）插件：**OpenCode Go 套餐的多 Key 池** —— �
 | 🧭 无缝接管 | 接管 `opencode-go` 路由：删除「设置 → 模型」中的 opencode-go 行后自动完成，历史会话与模型选择器完全不变 |
 | 🗂 模型选择 | 卡片内勾选该路由暴露哪些模型：「全部模型」跟随官方目录；自定义时未勾选的模型不出现在聊天模型下拉、也无法发起请求；默认折叠，点「展开」查看 |
 | 📥 拉取最新模型 | 卡片内「拉取模型」从官方 `models` 接口抓取供应商最新模型列表；目录里还没有的新模型即时进入可选列表（按默认协议接入，勾选即可尝试） |
+| 📈 输入框额度胶囊 | 输入框内、模型选择器**左侧**的常驻胶囊：当前会话用的正是本池路由时，直接显示服务中账户的「5h x% · wk y% · mo z%」并随用量阈值从灰阶升到琥珀 / 红；点开弹层看三个窗口的完整名称、重置倒计时、账户名与手动刷新；切到别的供应商即刻隐藏，也不产生任何额度流量 |
 
 ## 安装
 
@@ -130,10 +131,20 @@ Authorization: Bearer <OpenCode Go API Key>
 1. **标题行**：左侧标题与副标题，最右侧一枚接管状态徽标 —— **已接管为绿色**，自有路由 / 等待接管为橙色。等待接管时下方保留一段可操作的提示（告诉你删掉「设置 → 模型」里的 opencode-go 行），其余情况不再占版面；
 2. **账户**：组头右侧是刷新按钮与「更新于 时间」（同一行、居中对齐）。每个凭据一张瘦身卡片 —— 一行标题（状态圆点 · 名称 · 徽章 · 展开箭头）+ 一行紧凑额度条，**左上角的「⋯」菜单**承担全部操作（设为当前使用 / 编辑凭据 / 重命名 / 停用·启用 / 清除失效 / 删除）。编辑凭据就是卡片内联表单，密钥只走凭据服务。卡片下方是「添加账户」、切号策略与最近一次切号；
 3. **模型**：模型范围（全部 / 自定义）+ 拉取模型 + 可勾选清单；
-4. **集成与显示**：侧边栏额度卡片开关；
+4. **集成与显示**：侧边栏额度卡片开关（输入框额度胶囊无需开关：只在用本池路由时出现）；
 5. **高级设置**（默认收起）：请求超时 / 流空闲超时 / 网络失败重试次数。
 
 侧边栏额度卡片打开的是一个居中列的额度面板，逐账户显示三条额度条与重置倒计时。
+
+### 输入框额度胶囊
+
+输入框工具行的最右侧、**模型选择器左边**还有一枚胶囊（DSH 的 `conversation.input.right` 槽位渲染在 `conversation.input.model` 之前，所以它天然落在模型左侧）。它挂在同一个数据层上，不是第二套轮询：
+
+- **只在用本池路由时出现**：可见性由会话实时的模型选择投影（`modelSelection`）决定 —— 供应商是本插件的路由（默认 `opencode-go`，自有路由模式为 `opencode-go-pool`，或你在配置里改名后的路由）时显示，切到任何别的供应商同一帧就隐藏。
+- **显示服务中账户的用量**：胶囊内即「5h 9% · wk 12% · mo 6%」（5 小时滚动 / 每周 / 每月），并按用量分级换色：50% 起琥珀、80% 转红、90% 起加粗红，被限流的窗口直接按最高级显示。
+- **点开看详情**：弹层在胶囊正上方展开，逐窗口给出完整名称、百分比与「剩余 4h 30m」式倒计时，底部是账户名、**刷新**与数据时间；点胶囊外任意处或按 Esc 收起。
+- **数据还没有时说实话**：首次查询在途显示「查询中…」，池里没有账户显示「用量不可用」，某个 Key 查失败则显示 `<err:unauthorized>` 之类的编码，点开弹层看到人话解释并可就地刷新。
+- **不做的事**：胶囊没有任何配置项，也不额外轮询 —— 它复用池自身的刷新间隔（`usageRefreshMs`）；关闭该会话的路由时不会留下任何后台请求。弹层**没有金额行**：本插件调的 `/zen/go/v1/usage` 只返回 `status` / `percent` / `resetsAt`，不返回金额，所以不编造 `$used / $limit` 或余额。
 
 ### 保存：账户即时落地，配置走浮动保存条
 
@@ -154,7 +165,7 @@ Authorization: Bearer <OpenCode Go API Key>
 
 - Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（111 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、导入与 Typert 清单 7、客户端 bundle 执行与渲染 23（`client`：槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板、store 两段式加载与轮询生命周期）。缺少 harness 依赖时相关测试优雅跳过。
+- 测试：`node --test test/*.test.mjs`（126 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 35（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板、store 两段式加载与轮询生命周期、输入框胶囊的可见性门控 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -172,12 +183,19 @@ MIT
 
 ## 验证记录
 
+**2026-10-09 输入框额度胶囊**：`node test/*.test.mjs`（逐个文件、进程内运行）→ 126 项，125 通过、0 跳过；唯一失败是 `current-dsh-import.test.mjs` 里「用真实子进程导入插件入口」那一项（`spawnSync` 的 `status` 为 `null`），属本机沙箱禁止捕获子进程输出所致 —— 该断言的等价检查已单独执行：`import('./index.js')` 正常返回 `Config` / `OpenCodeGoPool` / `buildProfile` / `createPiAiAuth` / `createSettingsScope`。本轮改动与对应测试：
+
+- **新增第 4 个槽位**：`client.js` 注册 `conversation.input.right`（id `opencode-go-pool-chip`，`order` 110，复用页面字典）—— DSH 的 `InputBar` 先渲染该槽位、再渲染 `conversation.input.model`，所以胶囊落在模型选择器左侧。端到端搬运参考插件 [dsh-opencode-go-usage](https://github.com/xiaoqi20/dsh-opencode-go-usage) 的显示方式：同一枚 OpenCode Go 图标（内联双色 SVG，跟随 `body[data-ds-dark-theme]` 切换）、同样的「5h / wk / mo」内联分段与 50/60/70/80/90 分级配色、同样的向上弹层与点外部 / Esc 收起。
+- **用它自己的机制，不搬配置**：数据来自同一个 `createPoolStore`（`status` + `usage` 两个 RPC）与同一个 `usageRefreshMs` 轮询，可见性来自会话投影 `modelSelection`，所以胶囊没有 cookie / workspace 之类的任何配置项。
+- **金额行按实际情况去掉**：直连官方接口核对过（`GET https://opencode.ai/zen/go/v1/usage` 实测返回 `{"usage":{"rolling":{"status":"ok","percent":11,"resetsAt":"…"},"weekly":…,"monthly":…}}`），只有 `status` / `percent` / `resetsAt`，没有任何金额字段，因此弹层不显示 `$used / $limit` 与余额行。
+- **测试**：`test/client.test.mjs` 新增 7 项 —— 槽位注册与「无需 layout 服务」、可见性门控（本池两个路由 + 自定义路由显示，其他供应商 / 空选择 / 无 session kit 一律渲染空）、服务中账户的读数与配色分级、无数据三态（查询中 / 未配置 / `<err:code>`）、弹层逐窗口名称百分比倒计时与刷新、空态与失败态的人话解释、以及纯函数（`formatDuration` / `remainingSec` / `hasReset` / `chipSeverity` / `chipPercentText` / `providerOfSelection` / `isPoolProvider`）的边界。
+
 **2026-10-09 界面与网络设置改版**：`node --test --test-isolation=none test/*.test.mjs` → 101 项通过、0 跳过（第 102 项 `current-dsh-import` 在本机沙箱下无法 `spawn` 子进程，属环境限制）。本轮改动与对应测试：
 
 - **首屏不再卡住**：`status` 拆成纯内存读取，新增 `usage` RPC 负责逐 Key 查询；`test/smoke.test.mjs` 用计数 fetch 证明 `status()` 零请求、`usage()` 每 Key 一次、并发调用共享一趟，并断言上一次结果会落到内存。
 - **高级设置真实生效**：`requestTimeoutMs`/`streamIdleTimeoutMs` 写进 `buildProfile`（`test/profile.test.mjs` 断言它们落在 `profile.timeoutMs` / `profile.streamIdleTimeoutMs`）；`transportMaxRetries` 由 `transport.js` 的每次请求预算执行，并已从路由 `retryableCodes` 中移除 `TRANSPORT`，`test/smoke.test.mjs` 走真实 cordis waterfall 验证「重试 N 次后抛出诊断」「新 step 重置预算」「取消的回合不消耗预算」「非本插件路由不干预」。
 - **断流可恢复**：适配器在内层流没有结束事件时不再静默返回，而是产出可重试的 `EMPTY_RESPONSE`（未吐内容）或 `STREAM_CLOSED`（已吐内容），两者都在路由白名单内 —— 断线会自动重发该 step，而不是整轮失败。
-- **界面**：`test/client.test.mjs` 实际执行 bundle 并渲染，断言三个槽位（`settings.section` / `main` / `sidebar.footer.action`）注册、四个模块小标题与三条分隔线、「⋯」按钮位于卡片左上角且在名称之前、收起态只有紧凑额度条、侧边栏卡片在开关关闭或状态未知时渲染空、额度面板逐账户三窗口。
+- **界面**：`test/client.test.mjs` 实际执行 bundle 并渲染，断言四个槽位（`settings.section` / `main` / `sidebar.footer.action` / `conversation.input.right`）注册、四个模块小标题与三条分隔线、「⋯」按钮位于卡片左上角且在名称之前、收起态只有紧凑额度条、侧边栏卡片在开关关闭或状态未知时渲染空、额度面板逐账户三窗口。
 
 **0.2.1-alpha.1 升级验证（2026-10-08）**：`node --test test/*.test.mjs` → 75 项全部通过、0 跳过，跑在 registry 安装的 `0.2.1-alpha.1` 依赖上（`@deepseek-ai/cordis@4.0.5-alpha.1`、`schemastery@3.18.5-alpha.1`、`@earendil-works/pi-ai@0.87.1`）。其中：
 
