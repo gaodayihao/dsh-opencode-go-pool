@@ -258,13 +258,56 @@ function validateSection(value) {
 }
 
 /**
+ * Give this route's DeepSeek-protocol models the explicit thinking-off spelling
+ * pi-ai declines to send on their behalf.
+ *
+ * pi-ai's `openai-completions` builder emits `thinking: { type: 'disabled' }`
+ * only while `model.thinkingLevelMap.off !== null`; a `null` `off` makes it send
+ * no thinking control at all, and the Go gateway then applies its own default,
+ * which is *on*. A caller that names no reasoning effort therefore spends its
+ * whole `max_tokens` on reasoning before any answer text exists.
+ *
+ * Measured against the live gateway on 2026-10-09 with `deepseek-v4.1-flash` and
+ * `max_tokens: 64`: the control body finished `length` with 0 characters of
+ * text and 64 reasoning tokens, while the same body plus
+ * `thinking: { type: 'disabled' }` finished `stop` with the answer and 0
+ * reasoning tokens.
+ *
+ * The harness's auxiliary calls are exactly that shape: `purpose:
+ * 'session-title'` dispatches with `maxOutputTokens: 64` and no effort, because
+ * the official DeepSeek adapter maps that purpose to thinking-disabled. On this
+ * route the title call therefore produced no text, the title policy rejected it,
+ * and every session silently kept its deterministic fallback title (the opening
+ * words of the first message) instead of a generated one.
+ *
+ * Removing a `null` `off` restores what the sibling models on this route already
+ * get: `deepseek-v4-flash`, `deepseek-v4-pro` and `kimi-k2.6` declare no `off`
+ * at all, so they do carry `thinking: { type: 'disabled' }` when no effort is
+ * named. The model picker regains a real "Off" level for the same reason.
+ *
+ * Only `thinkingFormat: 'deepseek'` is touched: that is the one off-spelling this
+ * gateway is known to accept, while every other vendor's `off: null`
+ * (glm / kimi / qwen / grok / …, whose formats differ) keeps its published
+ * meaning.
+ * @param {object} model - one descriptor from the route's catalog.
+ * @returns {object} the descriptor, with a null DeepSeek `off` removed.
+ */
+export function withExplicitThinkingOff(model) {
+  if (model?.compat?.thinkingFormat !== 'deepseek') return model
+  if (!model.thinkingLevelMap || model.thinkingLevelMap.off !== null) return model
+  const { off: _dropped, ...thinkingLevelMap } = model.thinkingLevelMap
+  return { ...model, thinkingLevelMap }
+}
+
+/**
  * Build the resolved pi-ai profile for the opencode-go catalog route.
  *
  * The catalog provider is wrapped so that models fetched from the official
  * models endpoint (see refreshModels) are merged into listModels /
  * resolveModel / stream: pi-ai reads `provider.getModels()` on every call, so
  * appending freshly pulled descriptors makes new supplier models usable
- * without a pi-ai package release. Known (shipped) models are never touched.
+ * without a pi-ai package release. Known (shipped) models are never replaced;
+ * their thinking map is normalized by withExplicitThinkingOff().
  *
  * The returned object is a *resolved* llm-pi-ai profile, so it must carry every
  * adapter-owned field that package reads; llm-pi-ai resolves them from its own
@@ -282,7 +325,7 @@ export function buildProfile(route, dynamicDescriptors, tuning = {}) {
     getModels: () => {
       const base = upstream.getModels()
       const extras = dynamicDescriptors(route).filter(descriptor => !base.some(m => m.id === descriptor.id))
-      return extras.length > 0 ? [...base, ...extras] : base
+      return (extras.length > 0 ? [...base, ...extras] : base).map(withExplicitThinkingOff)
     },
   }
   return {

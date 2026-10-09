@@ -169,7 +169,7 @@ Authorization: Bearer <OpenCode Go API Key>
 
 - Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（130 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 39（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板与标题行的对齐、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
+- 测试：`node --test test/*.test.mjs`（132 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 6（`profile`：含思考控制规整 2 项）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 39（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板与标题行的对齐、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -186,6 +186,15 @@ node --test test/*.test.mjs
 MIT
 
 ## 验证记录
+
+**2026-10-09 标题不再提炼，只抄第一条消息**：`node --test --test-isolation=none test/*.test.mjs`（进程内运行）→ 132 项，131 通过、0 跳过；唯一失败仍是 `current-dsh-import.test.mjs` 里需要 `spawn` 子进程的那一项（沙箱禁止捕获子进程输出；插件入口的实际导入由 `test/profile.test.mjs` 就地覆盖）。
+
+- **症状**：新会话的标题不再是模型提炼出的关键信息，而是第一条消息开头几个字（DSH 的兜底标题），且只在本池路由上出现。
+- **定位**：会话日志里每次都有 `session/title-llm-request`（`route=opencode-go/deepseek-v4.1-flash`、`maxTokens=64`），但之后没有 `source: provider` 的 `session/title` —— 辅助调用发出去了、没有结果。pi-ai 的 `openai-completions` 只在 `model.thinkingLevelMap.off !== null` 时才发 `thinking: { type: 'disabled' }`（`dist/api/openai-completions.js:666-677`），而目录里 `deepseek-v4.1-flash` 声明的正是 `off: null`，于是「不带 reasoning effort 的请求」一个思考控制都不带，网关按默认（思考开）推理。Harness 的标题调用恰好是这种形状：官方 DeepSeek 适配器会把 `purpose: 'session-title'` 映射成关思考，所以宿主只给 64 token。
+- **网关实测**（2026-10-09，`deepseek-v4.1-flash`、`max_tokens: 64`）：不带思考控制 → `finish=length`、正文 0 字、`reasoning_tokens=64`；同一请求加 `thinking: { type: 'disabled' }` → `finish=stop`、正文 44 字、23 output tokens、0 reasoning tokens。
+- **修法**：`buildProfile().getModels()` 对 `thinkingFormat: 'deepseek'` 的模型去掉这个 null `off`（新增 `withExplicitThinkingOff`），让「没指定 effort」的请求带上 disabled —— 与同路由的 `deepseek-v4-flash` / `deepseek-v4-pro` / `kimi-k2.6`（本来就没有 `off` 键）一致；模型选择器同时恢复出真正可用的「Off」档。其他厂商的 `off: null`（glm / kimi-k3 / qwen / grok…，`thinkingFormat` 不同）保持原义。
+- **实测 wire body**（注入假 `fetch` 跑真实 SDK，未联网）：原描述符 + 无 effort → 无 `thinking`；规整后 + 无 effort → `thinking:{type:'disabled'}`；规整后 + 显式 high（主对话）→ `thinking:{type:'enabled'}` + `reasoning_effort:'high'`（不受影响）；规整后 + 选「Off」→ `thinking:{type:'disabled'}`。
+- **测试**：`test/profile.test.mjs` 新增 2 项（4 → 6）—— 一项钉住规整本身（去掉 null `off`、其他 `thinkingFormat` 不动、不修改传入描述符），一项用 pi-ai 的 `getSupportedThinkingLevels` 断言「Off」档由隐藏变为可选，并遍历真实目录断言所有 deepseek 格式模型都不再带 null `off`。
 
 **2026-10-09 额度面板标题行对齐**：`node test/*.test.mjs`（逐个文件、进程内运行）→ 130 项，129 通过、0 跳过；唯一失败仍是 `current-dsh-import` 里需要 `spawn` 子进程的那一项。本轮改动与对应测试：
 

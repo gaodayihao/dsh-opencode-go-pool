@@ -243,6 +243,8 @@ const inner = new PiAiAdapter({
 })
 ```
 
+> **思考控制（2026-10-09）**：pi-ai 的 `openai-completions` 只在 `model.thinkingLevelMap.off !== null` 时才发 `thinking: { type: 'disabled' }`。目录里的 `deepseek-v4.1-flash` 恰好声明了 `off: null`，所以「没带 reasoning effort 的请求」不带任何思考控制，网关按默认（思考开）推理；而 Harness 的辅助调用（`purpose: 'session-title'`、`maxOutputTokens: 64`）正是这种形状 —— 64 token 全被思考吃掉、正文为空，标题调用被判失败，会话只留下兜底标题。同路由的 `deepseek-v4-flash` / `deepseek-v4-pro` / `kimi-k2.6` 都没有 `off` 键，本来就会带上 disabled。插件在 `buildProfile().getModels()` 里用 `withExplicitThinkingOff` 去掉这种 null `off`（只处理 `thinkingFormat: 'deepseek'`，其他厂商的 `off: null` 保持原义）。网关实测（2026-10-09）：控制组 `finish=length`、正文 0 字、64 reasoning tokens；加 `thinking: { type: 'disabled' }` 后 `finish=stop`、23 output tokens、0 reasoning tokens。
+
 > 实现注意：若 `opencodeGoProvider()` 未从 pi-ai 包根导出，则从 `pi-ai/dist/providers` 子路径导入或手写等价 Provider（三个 API + 目录模型，字段已全部核实）。
 
 ### 5.4 路由接管协议

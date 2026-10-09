@@ -17,16 +17,16 @@ import test from 'node:test'
 // installed adapter, which catches the crash on any release that reads them.
 
 async function loadProfile(t) {
-  let buildProfile, resolveRetryPolicy, PiAiAdapter, createPiAiAuth
+  let buildProfile, resolveRetryPolicy, PiAiAdapter, createPiAiAuth, withExplicitThinkingOff
   try {
-    ;({ buildProfile, createPiAiAuth } = await import('../index.js'))
+    ;({ buildProfile, createPiAiAuth, withExplicitThinkingOff } = await import('../index.js'))
     ;({ resolveRetryPolicy } = await import('@deepseek-ai/dsh-llm'))
     ;({ PiAiAdapter } = await import('@deepseek-ai/dsh-llm-pi-ai'))
   } catch {
     t.skip('harness peer deps not installed — link the DSH node_modules to run the profile tests')
     return null
   }
-  return { buildProfile, resolveRetryPolicy, PiAiAdapter, createPiAiAuth }
+  return { buildProfile, resolveRetryPolicy, PiAiAdapter, createPiAiAuth, withExplicitThinkingOff }
 }
 
 const route = 'opencode-go'
@@ -142,4 +142,84 @@ test('createPiAiAuth declares no pi-ai credential records and refuses writes', a
   assert.equal(await auth.authContext.env('not-a-reference'), process.env['not-a-reference'])
   assert.equal(await auth.authContext.fileExists('~'), true, 'the home directory exists')
   assert.equal(await auth.authContext.fileExists('~/.definitely-missing-dsh-probe'), false)
+})
+
+// ---- thinking-off restoration ---------------------------------------------
+//
+// pi-ai's `openai-completions` builder emits `thinking: { type: 'disabled' }`
+// only while `model.thinkingLevelMap.off !== null`; a null `off` sends no
+// thinking control at all and the Go gateway then reasons by default. The
+// harness's auxiliary calls are exactly the shape that breaks: `purpose:
+// 'session-title'` dispatches with maxOutputTokens 64 and no reasoning effort,
+// because the official DeepSeek adapter maps that purpose to thinking-disabled.
+// Measured against the live gateway on 2026-10-09 with deepseek-v4.1-flash and
+// max_tokens 64: no thinking control finished `length` with 0 characters of
+// text and 64 reasoning tokens, while the same body plus
+// `thinking: { type: 'disabled' }` finished `stop` with the answer and 0
+// reasoning tokens. Every session therefore kept its deterministic fallback
+// title (the opening words of its first message) instead of a generated one.
+
+const deepseekDescriptor = {
+  id: 'deepseek-v4.1-flash',
+  name: 'DeepSeek V4.1 Flash',
+  provider: route,
+  api: 'openai-completions',
+  baseUrl: 'https://opencode.ai/zen/go/v1',
+  input: ['text'],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  reasoning: true,
+  thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' },
+  compat: { supportsStore: false, maxTokensField: 'max_tokens', thinkingFormat: 'deepseek' },
+  contextWindow: 1000000,
+  maxTokens: 384000,
+}
+
+test('drops a null DeepSeek off so pi-ai can send thinking disabled', async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { withExplicitThinkingOff } = harness
+
+  const normalized = withExplicitThinkingOff(deepseekDescriptor)
+  assert.ok(!('off' in normalized.thinkingLevelMap), 'the null off is gone')
+  assert.equal(normalized.thinkingLevelMap.high, 'high', 'every other level survives')
+  assert.equal(deepseekDescriptor.thinkingLevelMap.off, null, 'the shipped descriptor is not mutated')
+
+  // Only the off-spelling this gateway is known to accept is rewritten.
+  const otherFormat = { ...deepseekDescriptor, compat: { thinkingFormat: 'qwen' } }
+  assert.equal(withExplicitThinkingOff(otherFormat), otherFormat, 'another thinking format keeps its own off')
+  const alreadySpelled = { ...deepseekDescriptor, thinkingLevelMap: { off: 'none', high: 'high' } }
+  assert.equal(withExplicitThinkingOff(alreadySpelled), alreadySpelled, 'a real off spelling is left alone')
+  const noMap = { ...deepseekDescriptor, reasoning: false, thinkingLevelMap: undefined }
+  assert.equal(withExplicitThinkingOff(noMap), noMap, 'a descriptor without a level map passes through')
+})
+
+test('the served catalog normalizes the shipped model and offers a real Off', async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { buildProfile, withExplicitThinkingOff } = harness
+  let getSupportedThinkingLevels
+  try {
+    ;({ getSupportedThinkingLevels } = await import('@earendil-works/pi-ai'))
+  } catch {
+    t.skip('@earendil-works/pi-ai is not installed')
+    return
+  }
+
+  // Baseline: the levels pi-ai derives from a null off hide "Off" entirely,
+  // which is why the picker never offered a way not to think.
+  assert.ok(!getSupportedThinkingLevels(deepseekDescriptor).includes('off'), 'a null off hides the level')
+  assert.ok(
+    getSupportedThinkingLevels(withExplicitThinkingOff(deepseekDescriptor)).includes('off'),
+    'the normalized model offers it',
+  )
+
+  const served = buildProfile(route, () => []).piProvider.getModels()
+  for (const model of served) {
+    if (model.compat?.thinkingFormat === 'deepseek') {
+      assert.notEqual(model.thinkingLevelMap?.off, null, `${model.id} carries no null DeepSeek off`)
+    }
+  }
+  const shipped = served.find(model => model.id === 'deepseek-v4.1-flash')
+  assert.ok(shipped, 'the installed catalog ships the flash model this regression is about')
+  assert.ok(!('off' in shipped.thinkingLevelMap), 'the shipped flash model is normalized in the served catalog')
 })
