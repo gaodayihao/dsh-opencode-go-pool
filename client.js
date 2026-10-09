@@ -156,6 +156,8 @@ window.__ModuleLoader__.load({
       integrationsHint: '对话之外复用本插件的界面。',
       showSidebarQuota: '在侧边栏显示额度卡片',
       showSidebarQuotaHint: '在侧边栏底部（设置上方）显示余额卡片，点击打开额度面板。默认关闭；关闭时不发起任何额度查询。',
+      showComposerQuota: '在输入框显示额度胶囊',
+      showComposerQuotaHint: '在输入框内、模型选择器左侧显示当前使用账户的额度胶囊：内联 5h/wk/mo 用量并分级配色，点开看各窗口完整名称与重置倒计时。只在会话使用本池路由时出现，切换供应商即隐藏；关闭后不做任何额度查询。',
 
       advancedTitle: '高级设置',
       advancedHint: '网络请求的超时与重试。除非遇到超时或断连，否则保持默认即可。',
@@ -306,6 +308,8 @@ window.__ModuleLoader__.load({
       integrationsHint: 'Surfaces outside chat that reuse this plugin.',
       showSidebarQuota: 'Show the quota card in the sidebar',
       showSidebarQuotaHint: 'Shows the balance card at the sidebar foot (above Settings); clicking it opens the quota dashboard. Off by default, and while off no usage query is made at all.',
+      showComposerQuota: 'Show the quota chip in the composer',
+      showComposerQuotaHint: 'Shows the chip for the active account inside the composer, left of the model selector: inline 5h/wk/mo usage with severity colours, and a popover with each window full name and reset countdown. It appears only while the session runs on this pool route and hides with the provider; while off no usage query is made at all.',
 
       advancedTitle: 'Advanced',
       advancedHint: 'Request timeouts and retries. Leave the defaults alone unless you are hitting timeouts or dropped connections.',
@@ -807,6 +811,7 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
         mode: data.modelMode === 'custom' ? 'custom' : 'all',
         ids: available.filter(model => model.enabled).map(model => model.id),
         showSidebarQuota: data.showSidebarQuota === true,
+        showComposerQuota: data.showComposerQuota === true,
       };
     }
 
@@ -849,6 +854,7 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
       if (reading.stream.value !== Number(secondsTextToMs(baseline.stream).value)) patch.streamIdleTimeoutMs = reading.stream.value;
       if (reading.retries.value !== Number(baseline.retries)) patch.transportMaxRetries = reading.retries.value;
       if (current.showSidebarQuota !== baseline.showSidebarQuota) patch.showSidebarQuota = current.showSidebarQuota;
+      if (current.showComposerQuota !== baseline.showComposerQuota) patch.showComposerQuota = current.showComposerQuota;
       if (current.mode !== baseline.mode || !sameIds(current.ids, baseline.ids)) {
         patch.modelMode = current.mode;
         patch.models = current.mode === 'all' ? [] : current.ids;
@@ -1714,25 +1720,28 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
     /** Integrations & display: surfaces outside chat that reuse this plugin. */
     function IntegrationsGroup(props) {
       const { t, busy, current, onEdit } = props;
+      /** One display toggle: a title/description row with a switch on the right. */
+      const toggle = (field, label, hint) => React.createElement(SettingRow, {
+        title: t(label),
+        htmlFor: `ogp-${field}`,
+        description: t(hint),
+        control: React.createElement('input', {
+          id: `ogp-${field}`,
+          className: 'ogp-toggle',
+          type: 'checkbox',
+          role: 'switch',
+          checked: current[field] === true,
+          disabled: busy !== null,
+          onChange: event => onEdit(field, event.target.checked),
+        }),
+      });
       return React.createElement(SettingsGroup, {
         title: t('integrationsTitle'),
         description: t('integrationsHint'),
         divided: true,
       },
-        React.createElement(SettingRow, {
-          title: t('showSidebarQuota'),
-          htmlFor: 'ogp-show-sidebar-quota',
-          description: t('showSidebarQuotaHint'),
-          control: React.createElement('input', {
-            id: 'ogp-show-sidebar-quota',
-            className: 'ogp-toggle',
-            type: 'checkbox',
-            role: 'switch',
-            checked: current.showSidebarQuota,
-            disabled: busy !== null,
-            onChange: event => onEdit('showSidebarQuota', event.target.checked),
-          }),
-        }),
+        toggle('showSidebarQuota', 'showSidebarQuota', 'showSidebarQuotaHint'),
+        toggle('showComposerQuota', 'showComposerQuota', 'showComposerQuotaHint'),
       );
     }
 
@@ -2473,8 +2482,10 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
     function QuotaChip(props) {
       // This shell deliberately calls NO hooks, so a runtime whose slot props
       // carry no session kit (an older Host, or a hand-made unit render) drops
-      // the chip instead of throwing inside the composer.
-      if (typeof props.useProjection !== 'function') return null;
+      // the chip instead of throwing inside the composer. Both hooks below come
+      // from the same merged session-kit interface, so demanding both costs
+      // nothing a runtime could actually have.
+      if (typeof props.useProjection !== 'function' || typeof props.useSession !== 'function') return null;
       return React.createElement(QuotaChipBody, props);
     }
 
@@ -2482,27 +2493,54 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
      * The OpenCode Go usage chip.
      *
      * It renders nothing unless the session's live model selection is one this
-     * pool serves, and it holds the shared store open while it shows, so the
-     * numbers follow the pool's own refresh interval. Clicking toggles a
-     * popover with the three windows, their reset countdowns and a manual
-     * refresh; a press outside it (or Escape) closes it.
+     * pool serves AND the `showComposerQuota` switch is on, and it holds the
+     * shared store open only while it actually shows. The readout is always the
+     * account the pool is CURRENTLY serving (`keys[].active`), so a manual switch
+     * and an automatic rotation both land here; a turn ending re-reads the pool,
+     * because a turn is the one moment the pool rotates on its own. Clicking
+     * toggles a popover with the three windows, their reset countdowns and a
+     * manual refresh; a press outside it (or Escape) closes it.
      */
     function QuotaChipBody(props) {
       const { t, store } = props;
       const selection = props.useProjection('modelSelection');
+      const running = props.useSession(state => state.running) === true;
       const snapshot = React.useSyncExternalStore(store.subscribe, store.get, store.get);
       const data = snapshot.data;
-      const visible = isPoolProvider(providerOfSelection(selection), data ? data.route : undefined);
+      const known = data !== null;
+      const providerMatches = isPoolProvider(providerOfSelection(selection), known ? data.route : undefined);
+      const enabled = known && data.showComposerQuota === true;
+      const visible = providerMatches && enabled;
       const [open, setOpen] = React.useState(false);
       const wrapRef = React.useRef(null);
+      const wasRunning = React.useRef(false);
 
-      // Hold the shared poll open while the chip is on screen. Off the
-      // opencode-go routes this never runs, so no other provider's user gets
-      // background quota traffic.
+      // Learn the display flag before deciding anything. `probeOnce` is the
+      // status-only, network-free read, and it is asked for ONLY while the
+      // session runs on one of our routes, so no other provider's user pays for
+      // it — and while the switch is off, the probe is the only thing that runs.
+      React.useEffect(() => {
+        if (!providerMatches || known) return undefined;
+        void store.probeOnce();
+        return undefined;
+      }, [providerMatches, known, store]);
+
+      // Hold the shared poll open only while the chip is actually on screen.
       React.useEffect(() => {
         if (!visible) return undefined;
         return store.retain();
       }, [visible, store]);
+
+      // A turn is the only moment the pool rotates by itself (a key ran out
+      // mid-request), so re-read the pool when one ends: the chip follows the
+      // account that actually served it instead of showing the spent one until
+      // the next scheduled poll. A mount with no prior turn is not a transition.
+      React.useEffect(() => {
+        const settled = wasRunning.current && !running;
+        wasRunning.current = running;
+        if (!visible || !settled) return;
+        void store.refresh();
+      }, [running, visible, store]);
 
       // Leaving the route closes an open popover: the chip is about to unmount
       // its body anyway, and this keeps the state from reopening stale.
@@ -2528,6 +2566,10 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
       if (!visible) return null;
 
       const keys = data && Array.isArray(data.keys) ? data.keys : [];
+      // The account the pool is serving RIGHT NOW, not the first one: the host
+      // marks exactly one row `active` from its live `pool.activeId`, so a manual
+      // switch and an automatic rotation both move the readout on the next read.
+      // The first row is only a fallback for a pool whose active key is gone.
       const serving = keys.find(key => key.active) ?? keys[0] ?? null;
       const usage = (serving && serving.usage) || {};
       const rows = CHIP_WINDOWS

@@ -761,6 +761,9 @@ test('the strict wire schemas accept the real status and usage payloads', async 
   assert.equal(cold.requestTimeoutMs, 300000)
   assert.equal(cold.transportMaxRetries, 5)
   assert.equal(cold.showSidebarQuota, false)
+  // The two display switches keep their opposite defaults: the sidebar card is
+  // opt-in, the composer chip is opt-out.
+  assert.equal(cold.showComposerQuota, true)
 
   // After it: the values and the fetch time ride the same rows.
   const usage = schemaFor('usage').parse(await plugin.usage())
@@ -821,6 +824,7 @@ test('puts the pool behind the route the picked-up profile patch configures', as
   assert.equal(status.streamIdleTimeoutMs, 300000)
   assert.equal(status.transportMaxRetries, 5)
   assert.equal(status.showSidebarQuota, false)
+  assert.equal(status.showComposerQuota, true)
   assert.equal(status.keys.length, 2)
   assert.equal(status.keys[0].label, '小号')
   assert.equal(status.keys[0].usagePending, true)
@@ -838,7 +842,7 @@ test('the shipped bundle patch declares the whole default surface', async (t) =>
   for (const key of [
     'route', 'keys', 'preemptAtPercent', 'switchAfterConsecutiveFailures',
     'modelMode', 'models', 'requestTimeoutMs', 'streamIdleTimeoutMs',
-    'transportMaxRetries', 'showSidebarQuota', 'usageBaseUrl', 'usageRefreshMs', 'timeoutMs',
+    'transportMaxRetries', 'showSidebarQuota', 'showComposerQuota', 'usageBaseUrl', 'usageRefreshMs', 'timeoutMs',
   ]) {
     assert.match(patch, new RegExp(`^\\s+${key}:`, 'm'), `the bundle patch declares ${key}`)
   }
@@ -855,24 +859,28 @@ test('putConfig accepts the advanced network settings and refuses nonsense', asy
     streamIdleTimeoutMs: 9000,
     transportMaxRetries: 8,
     showSidebarQuota: true,
+    showComposerQuota: false,
   })
   assert.deepEqual(settings.writes[0].patch, {
     requestTimeoutMs: 42000,
     streamIdleTimeoutMs: 9000,
     transportMaxRetries: 8,
     showSidebarQuota: true,
+    showComposerQuota: false,
   })
   const status = await plugin.status()
   assert.equal(status.requestTimeoutMs, 42000)
   assert.equal(status.streamIdleTimeoutMs, 9000)
   assert.equal(status.transportMaxRetries, 8)
   assert.equal(status.showSidebarQuota, true)
+  assert.equal(status.showComposerQuota, false)
 
   await assert.rejects(() => plugin.putConfig({ requestTimeoutMs: 10 }), /requestTimeoutMs/)
   await assert.rejects(() => plugin.putConfig({ streamIdleTimeoutMs: 99_999_999 }), /streamIdleTimeoutMs/)
   await assert.rejects(() => plugin.putConfig({ transportMaxRetries: 51 }), /transportMaxRetries/)
   await assert.rejects(() => plugin.putConfig({ transportMaxRetries: 1.5 }), /transportMaxRetries/)
   await assert.rejects(() => plugin.putConfig({ showSidebarQuota: 'yes' }), /showSidebarQuota/)
+  await assert.rejects(() => plugin.putConfig({ showComposerQuota: 'yes' }), /showComposerQuota/)
   assert.equal(settings.writes.length, 1, 'a refused write never reaches the settings seam')
   await root.fiber.dispose()
 })

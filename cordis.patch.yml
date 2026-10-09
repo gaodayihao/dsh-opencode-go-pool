@@ -12,6 +12,7 @@
         streamIdleTimeoutMs: 300000
         transportMaxRetries: 5
         showSidebarQuota: false
+        showComposerQuota: true
         usageBaseUrl: https://opencode.ai/zen/go/v1/usage
         usageRefreshMs: 30000
         timeoutMs: 15000

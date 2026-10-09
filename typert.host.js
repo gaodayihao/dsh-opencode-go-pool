@@ -85,6 +85,7 @@ const poolStatusSchema = z.object({
   streamIdleTimeoutMs: z.number(),
   transportMaxRetries: z.number(),
   showSidebarQuota: z.boolean(),
+  showComposerQuota: z.boolean(),
   modelMode: z.string(),
   availableModels: z.array(z.object({
     id: z.string(),
@@ -149,6 +150,7 @@ export const TYPERT = {
         streamIdleTimeoutMs: z.number().optional(),
         transportMaxRetries: z.number().optional(),
         showSidebarQuota: z.boolean().optional(),
+        showComposerQuota: z.boolean().optional(),
         modelMode: z.string().optional(),
         models: z.array(z.string()).optional(),
       }) },

@@ -51,6 +51,7 @@ dsh plugin --profile web add github:gaodayihao/dsh-opencode-go-pool
     streamIdleTimeoutMs: 300000 # 流空闲超时，由适配器的 idleWatchdog 执行
     transportMaxRetries: 5      # 网络失败（TRANSPORT）每次模型请求的重试预算
     showSidebarQuota: false     # 侧边栏额度卡片开关
+    showComposerQuota: true     # 输入框额度胶囊开关
     usageBaseUrl: https://opencode.ai/zen/go/v1/usage
     usageRefreshMs: 30000
     timeoutMs: 15000            # 用量/模型接口的请求超时
@@ -119,6 +120,7 @@ Authorization: Bearer <OpenCode Go API Key>
 | `streamIdleTimeoutMs` | `300000` | **流空闲超时**：生成流停滞多久视为死连接，写入 profile 的 `streamIdleTimeoutMs`，由适配器的 `idleWatchdog` 执行（「高级设置」可改，1–3600 秒） |
 | `transportMaxRetries` | `5` | **网络失败重试次数**：连接类失败（`TRANSPORT`）每次模型请求的重试预算，0–50（「高级设置」可改） |
 | `showSidebarQuota` | `false` | 在侧边栏底部显示额度卡片；关闭时不发起任何额度查询（「集成与显示」可改） |
+| `showComposerQuota` | `true` | 在输入框内、模型选择器左侧显示额度胶囊；**默认开启**（它只在会话使用本池路由时出现，不会为其他供应商产生流量），关闭后同样不做任何额度查询（「集成与显示」可改） |
 | `usageBaseUrl` | `https://opencode.ai/zen/go/v1/usage` | 用量接口地址 |
 | `modelsBaseUrl` | `https://opencode.ai/zen/go/v1/models` | 「拉取模型」接口地址 |
 | `usageRefreshMs` | `30000` | 卡片轮询间隔（host 侧另有 15s TTL 缓存） |
@@ -131,7 +133,7 @@ Authorization: Bearer <OpenCode Go API Key>
 1. **标题行**：左侧标题与副标题，最右侧一枚接管状态徽标 —— **已接管为绿色**，自有路由 / 等待接管为橙色。等待接管时下方保留一段可操作的提示（告诉你删掉「设置 → 模型」里的 opencode-go 行），其余情况不再占版面；
 2. **账户**：组头右侧是刷新按钮与「更新于 时间」（同一行、居中对齐）。每个凭据一张瘦身卡片 —— 一行标题（状态圆点 · 名称 · 徽章 · 展开箭头）+ 一行紧凑额度条，**左上角的「⋯」菜单**承担全部操作（设为当前使用 / 编辑凭据 / 重命名 / 停用·启用 / 清除失效 / 删除）。编辑凭据就是卡片内联表单，密钥只走凭据服务。卡片下方是「添加账户」、切号策略与最近一次切号；
 3. **模型**：模型范围（全部 / 自定义）+ 拉取模型 + 可勾选清单；
-4. **集成与显示**：侧边栏额度卡片开关（输入框额度胶囊无需开关：只在用本池路由时出现）；
+4. **集成与显示**：两个开关 —— 侧边栏额度卡片（默认关）与输入框额度胶囊（默认开）；
 5. **高级设置**（默认收起）：请求超时 / 流空闲超时 / 网络失败重试次数。
 
 侧边栏额度卡片打开的是一个居中列的额度面板，逐账户显示三条额度条与重置倒计时。
@@ -140,11 +142,13 @@ Authorization: Bearer <OpenCode Go API Key>
 
 输入框工具行的最右侧、**模型选择器左边**还有一枚胶囊（DSH 的 `conversation.input.right` 槽位渲染在 `conversation.input.model` 之前，所以它天然落在模型左侧）。它挂在同一个数据层上，不是第二套轮询：
 
+- **有开关**：「集成与显示 → 在输入框显示额度胶囊」（配置项 `showComposerQuota`）**默认开启**。它跟侧边栏卡片默认相反是有意的：胶囊只在会话用本池路由时才存在，不会为别的供应商产生任何流量；真不想要，关掉即可 —— 关闭后连状态探测都不做，等于这个界面不存在。
+- **始终跟当前使用账户**：读数取自 host 标了 `active` 的那一行（来自运行中的 `pool.activeId`），而不是第一条。所以在卡片里「设为当前使用」换号、或额度耗尽自动轮换之后，胶囊显示的就是正在服务的那个账户；一次回合结束后会立刻重新读一次池状态，所以自动轮换不必等到下一次轮询（`usageRefreshMs`）才纠正。
 - **只在用本池路由时出现**：可见性由会话实时的模型选择投影（`modelSelection`）决定 —— 供应商是本插件的路由（默认 `opencode-go`，自有路由模式为 `opencode-go-pool`，或你在配置里改名后的路由）时显示，切到任何别的供应商同一帧就隐藏。
 - **显示服务中账户的用量**：胶囊内即「5h 9% · wk 12% · mo 6%」（5 小时滚动 / 每周 / 每月），并按用量分级换色：50% 起琥珀、80% 转红、90% 起加粗红，被限流的窗口直接按最高级显示。
 - **点开看详情**：弹层在胶囊正上方展开，逐窗口给出完整名称、百分比与「剩余 4h 30m」式倒计时，底部是账户名、**刷新**与数据时间；点胶囊外任意处或按 Esc 收起。
 - **数据还没有时说实话**：首次查询在途显示「查询中…」，池里没有账户显示「用量不可用」，某个 Key 查失败则显示 `<err:unauthorized>` 之类的编码，点开弹层看到人话解释并可就地刷新。
-- **不做的事**：胶囊没有任何配置项，也不额外轮询 —— 它复用池自身的刷新间隔（`usageRefreshMs`）；关闭该会话的路由时不会留下任何后台请求。弹层**没有金额行**：本插件调的 `/zen/go/v1/usage` 只返回 `status` / `percent` / `resetsAt`，不返回金额，所以不编造 `$used / $limit` 或余额。
+- **不做的事**：胶囊没有自己的一套轮询 —— 它复用池自身的刷新间隔（`usageRefreshMs`），关闭开关或切走路由时不留下任何后台请求。弹层**没有金额行**：本插件调的 `/zen/go/v1/usage` 只返回 `status` / `percent` / `resetsAt`，不返回金额，所以不编造 `$used / $limit` 或余额。
 
 ### 保存：账户即时落地，配置走浮动保存条
 
@@ -165,7 +169,7 @@ Authorization: Bearer <OpenCode Go API Key>
 
 - Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（126 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 35（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板、store 两段式加载与轮询生命周期、输入框胶囊的可见性门控 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
+- 测试：`node --test test/*.test.mjs`（129 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 38（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -182,6 +186,13 @@ node --test test/*.test.mjs
 MIT
 
 ## 验证记录
+
+**2026-10-09 输入框胶囊的开关与跟号**：`node test/*.test.mjs`（逐个文件、进程内运行）→ 129 项，128 通过、0 跳过；唯一失败仍是 `current-dsh-import.test.mjs` 里「用真实子进程导入插件入口」那一项（沙箱禁止捕获子进程输出，其等价检查已单独执行通过）。
+
+- **新增开关 `showComposerQuota`（默认开）**：与 `showSidebarQuota` 走同一条链路 —— Config 的 volatile 布尔字段、`FALLBACK_CONFIG`、`status()` 回传、`putConfig` 的类型校验与补丁、typert 的 `PoolStatus` / `PoolConfigPatch` 契约、bundle patch 默认值，以及「集成与显示」里的第二个开关行（两行由一个内联 `toggle()` 生成，避免复制粘贴走样）。默认开而侧边栏那个默认关是有意的：胶囊只在会话用本池路由时存在，不会给别的供应商带来流量。
+- **关掉即静默**：胶囊只在开关为真时才 `retain()` 那趟共享轮询；开关未知（旧 Host 没有这个字段）按关处理 —— 半个更新的组合宁可什么都不显示，也不显示一个用户关不掉的东西。为此加了一次 `probeOnce()`（纯内存、零网络的 `status` 读）来先问开关，且只在会话已经跑在本池路由上时才问。
+- **跟当前使用账户**：读数取自 `keys[].active`（host 侧 `pool.activeId`）而不是第一条；另加一个「回合结束就重读池状态」的触发器 —— 一次回合正是池会自己换号的时刻（Key 中途耗尽），所以自动轮换不必等下一次 `usageRefreshMs` 才纠正；没有 `active` 标记时回落第一条，保证仍有话说。
+- **测试**：`test/client.test.mjs` 由 35 增至 38 —— 开关门控与「旧 Host 读作关」、跟号（`active` 搬家后数值与账户名同步替换、无 active 时回落第一条）、会话套件的两个 hook 缺一即隐藏、以及「集成与显示」恰好两个开关且各自读自己的草稿字段；`test/settings-forms.test.mjs` 的 volatile 字段集合与默认值、`test/smoke.test.mjs` 的默认值 / `putConfig` / 非布尔拒绝 / bundle patch 字段清单同步更新。
 
 **2026-10-09 输入框额度胶囊**：`node test/*.test.mjs`（逐个文件、进程内运行）→ 126 项，125 通过、0 跳过；唯一失败是 `current-dsh-import.test.mjs` 里「用真实子进程导入插件入口」那一项（`spawnSync` 的 `status` 为 `null`），属本机沙箱禁止捕获子进程输出所致 —— 该断言的等价检查已单独执行：`import('./index.js')` 正常返回 `Config` / `OpenCodeGoPool` / `buildProfile` / `createPiAiAuth` / `createSettingsScope`。本轮改动与对应测试：
 

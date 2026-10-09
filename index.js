@@ -139,6 +139,10 @@ export const Config = z.object({
   // The sidebar quota card is opt-in: a fresh install shows no quota surface in
   // the sidebar and runs no background poll.
   showSidebarQuota: z.boolean().default(false).volatile(),
+  // The composer chip is opt-out instead: it only exists while the session runs
+  // on this pool's own route, so it cannot appear (or poll) for anyone else's
+  // provider — and the reference surface it mirrors shows unconditionally.
+  showComposerQuota: z.boolean().default(true).volatile(),
   usageBaseUrl: z.string().default(DEFAULT_USAGE_BASE_URL),
   modelsBaseUrl: z.string().default(DEFAULT_MODELS_BASE_URL),
   usageRefreshMs: z.number().min(5000).max(300000).default(DEFAULT_USAGE_REFRESH_MS),
@@ -157,6 +161,7 @@ const FALLBACK_CONFIG = Object.freeze({
   streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   transportMaxRetries: DEFAULT_TRANSPORT_MAX_RETRIES,
   showSidebarQuota: false,
+  showComposerQuota: true,
   usageBaseUrl: DEFAULT_USAGE_BASE_URL,
   modelsBaseUrl: DEFAULT_MODELS_BASE_URL,
   usageRefreshMs: DEFAULT_USAGE_REFRESH_MS,
@@ -927,6 +932,7 @@ export class OpenCodeGoPool extends TypertRemoteService {
       streamIdleTimeoutMs: cfg.streamIdleTimeoutMs,
       transportMaxRetries: this.transportMaxRetries(),
       showSidebarQuota: cfg.showSidebarQuota === true,
+      showComposerQuota: cfg.showComposerQuota === true,
       modelMode: cfg.modelMode ?? 'all',
       availableModels,
       activeId: this.pool.activeId,
@@ -1115,6 +1121,10 @@ export class OpenCodeGoPool extends TypertRemoteService {
     if (config.showSidebarQuota !== undefined) {
       if (typeof config.showSidebarQuota !== 'boolean') throw new Error('showSidebarQuota must be a boolean')
       patch.showSidebarQuota = config.showSidebarQuota
+    }
+    if (config.showComposerQuota !== undefined) {
+      if (typeof config.showComposerQuota !== 'boolean') throw new Error('showComposerQuota must be a boolean')
+      patch.showComposerQuota = config.showComposerQuota
     }
     if (config.modelMode !== undefined) {
       if (config.modelMode !== 'all' && config.modelMode !== 'custom') throw new Error('modelMode must be "all" or "custom"')

@@ -86,6 +86,7 @@ test('the plugin Config is a valid 0.2.1 settings form of exactly the editable f
     'models',
     'preemptAtPercent',
     'requestTimeoutMs',
+    'showComposerQuota',
     'showSidebarQuota',
     'streamIdleTimeoutMs',
     'switchAfterConsecutiveFailures',
@@ -101,6 +102,7 @@ test('the plugin Config is a valid 0.2.1 settings form of exactly the editable f
     streamIdleTimeoutMs: 300000,
     transportMaxRetries: 5,
     showSidebarQuota: false,
+    showComposerQuota: true,
   })
   await root.fiber.dispose()
 })

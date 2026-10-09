@@ -80,6 +80,7 @@ const POOL_STATUS = {
   streamIdleTimeoutMs: 300000,
   transportMaxRetries: 5,
   showSidebarQuota: false,
+  showComposerQuota: true,
   modelMode: 'all',
   availableModels: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true, dynamic: false }],
   activeId: 'acc-a',
@@ -431,6 +432,14 @@ test('the staged patch carries only what actually moved', async (t) => {
   const toggled = { ...baseline, showSidebarQuota: true }
   assert.deepEqual(stagedPatch(toggled, baseline, readStaged(toggled)), { showSidebarQuota: true })
 
+  // Each display switch rides the patch on its own.
+  const chipOff = { ...baseline, showComposerQuota: false }
+  assert.deepEqual(stagedPatch(chipOff, baseline, readStaged(chipOff)), { showComposerQuota: false })
+  const bothToggled = { ...baseline, showSidebarQuota: true, showComposerQuota: false }
+  assert.deepEqual(stagedPatch(bothToggled, baseline, readStaged(bothToggled)), {
+    showSidebarQuota: true, showComposerQuota: false,
+  })
+
   // A model selection is two fields, and 'all' stores an empty list.
   const narrowed = { ...baseline, mode: 'custom', ids: ['deepseek-v4-pro'] }
   assert.deepEqual(stagedPatch(narrowed, baseline, readStaged(narrowed)), {
@@ -495,6 +504,35 @@ test('the models module carries the range switch and the allowlist', async (t) =
     onSetMode: () => {}, onToggleModel: () => {}, onFetch: () => {}, fetching: false,
   }))
   assert.ok(emptyHtml.includes('modelNone'), 'an empty custom selection is stated on the row')
+})
+
+test('the integrations module carries both display switches', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const { React, renderToString } = harness
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, React)
+  const { IntegrationsGroup } = module.__test
+
+  const edits = []
+  const data = { ...POOL_STATUS, showSidebarQuota: true, showComposerQuota: false }
+  const current = stagedFor(module, data).current
+  const html = renderToString(React.createElement(IntegrationsGroup, {
+    t: key => key,
+    busy: null,
+    current,
+    onEdit: (field, value) => edits.push([field, value]),
+  }))
+
+  assert.ok(html.includes('integrationsTitle'), 'the module heading renders')
+  assert.ok(html.includes('id="ogp-showSidebarQuota"'), 'the sidebar card switch renders')
+  assert.ok(html.includes('id="ogp-showComposerQuota"'), 'the composer chip switch renders')
+  assert.equal((html.match(/ogp-toggle/g) || []).length, 2, 'exactly two switches, no more')
+  // Each switch reads its own staged field: one on, one off, on one page.
+  assert.equal(current.showSidebarQuota, true)
+  assert.equal(current.showComposerQuota, false)
+  assert.equal((html.match(/checked/g) || []).length, 1, 'only the enabled switch renders checked')
+  assert.equal(edits.length, 0, 'rendering edits nothing by itself')
 })
 
 test('the advanced module exposes the three network settings', async (t) => {
@@ -984,8 +1022,12 @@ test('the stylesheet is installed once and keys its own tag', async (t) => {
 /** The projection a session reports while `provider` is its selected one. */
 const selected = provider => () => ({ next: { provider, model: 'deepseek-v4-flash' } })
 
-/** Render the registered chip with one model selection and pool status. */
-function renderChip(module, React, renderToString, status, useProjection) {
+/** The session snapshot selector the slot also delivers, idle by default. */
+const idleSession = selector => selector({ running: false })
+
+/** Render the registered chip with one model selection and pool status.
+ * Passing `useSession: null` renders it WITHOUT that session-kit hook. */
+function renderChip(module, React, renderToString, status, useProjection, useSession = idleSession) {
   const chip = module.__test.CHIP_ID
   const registration = bootClient(module).registrations['conversation.input.right']
   assert.equal(registration.id, chip)
@@ -993,6 +1035,7 @@ function renderChip(module, React, renderToString, status, useProjection) {
     t: key => key,
     store: stubStore(status),
     ...(useProjection === undefined ? {} : { useProjection }),
+    ...(useSession === null ? {} : { useSession }),
   }))
 }
 
@@ -1031,6 +1074,7 @@ test('the composer chip is registered for the slot rendered left of the model', 
     t: key => key,
     store: stubStore({ ...POOL_STATUS, keys: [chipKey({ rolling: 9, weekly: 12, monthly: 6 })] }),
     useProjection: selected('opencode-go'),
+    useSession: idleSession,
   }))
   assert.ok(html.includes('ogp-chipWrap'), 'renders the chip wrapper')
   assert.ok(html.includes('ogp-chipLogo') && html.includes('<svg'), 'the OpenCode Go mark is inlined')
@@ -1067,6 +1111,66 @@ test('the chip renders only while the session runs on a pool route', async (t) =
   assert.ok(renderChip(module, harness.React, harness.renderToString, custom, selected('my-ocg'))
     .includes('ogp-chipWrap'))
   assert.equal(renderChip(module, harness.React, harness.renderToString, custom, selected('my-other')), '')
+
+  // Both session-kit hooks are required: the shell takes the pair or nothing, so
+  // a runtime delivering only half drops the chip instead of throwing.
+  assert.equal(renderChip(module, harness.React, harness.renderToString, status, selected('opencode-go'), null),
+    '', 'a session kit without useSession hides the chip')
+})
+
+test('the chip obeys the display switch, and an older Host reads as off', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, harness.React)
+  const render = status => renderChip(module, harness.React, harness.renderToString, status, selected('opencode-go'))
+
+  assert.ok(render({ ...POOL_STATUS, keys: [KEY], showComposerQuota: true }).includes('ogp-chipWrap'),
+    'the switch on shows the chip')
+  assert.equal(render({ ...POOL_STATUS, keys: [KEY], showComposerQuota: false }), '',
+    'the switch off hides the chip entirely')
+
+  // A Host that predates the field answers `undefined`, which must read as off:
+  // a half-updated pair (new bundle, old Host) shows nothing rather than a
+  // control the user cannot turn off.
+  const { showComposerQuota: omitted, ...legacy } = POOL_STATUS
+  assert.equal(omitted, true)
+  assert.equal(render({ ...legacy, keys: [KEY] }), '', 'an older Host hides the chip')
+})
+
+test('the chip reads the account the pool is currently serving', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, harness.React)
+  const render = keys => renderChip(
+    module, harness.React, harness.renderToString, { ...POOL_STATUS, keys }, selected('opencode-go'),
+  )
+  const usage = (rolling, weekly, monthly) => ({
+    rolling: { status: 'ok', percent: rolling, resetsAt: null },
+    weekly: { status: 'ok', percent: weekly, resetsAt: null },
+    monthly: { status: 'ok', percent: monthly, resetsAt: null },
+  })
+  const primary = { ...KEY, id: 'key-a', label: '主号', usage: usage(11, 4, 2) }
+  const backup = { ...KEY, id: 'key-b', label: '备用', usage: usage(88, 40, 20) }
+
+  // 主号 is being served: its numbers and its name, not the idle row's.
+  const servingPrimary = render([{ ...primary, active: true }, { ...backup, active: false }])
+  assert.ok(servingPrimary.includes('5h 11%'), 'the served account numbers show')
+  assert.ok(servingPrimary.includes('主号'), 'and its name is on the chip label')
+  assert.ok(!servingPrimary.includes('5h 88%'), 'the idle account is not read out')
+
+  // A manual switch (or a quota rotation) moves `active` to 备用: the same
+  // render now reads the new account — the chip follows, it does not cache.
+  const servingBackup = render([{ ...primary, active: false }, { ...backup, active: true }])
+  assert.ok(servingBackup.includes('5h 88%'), 'the newly served account takes over')
+  assert.ok(servingBackup.includes('备用'), 'and its name replaces the old one')
+  assert.ok(!servingBackup.includes('5h 11%'), 'the previous account is gone from the chip')
+
+  // With no account marked active the first row is the fallback, so the chip
+  // still has something to say.
+  const noneActive = render([{ ...primary, active: false }, { ...backup, active: false }])
+  assert.ok(noneActive.includes('5h 11%'), 'a pool with no active mark falls back to the first row')
 })
 
 test('the chip reads out the serving account and escalates its tone', async (t) => {
