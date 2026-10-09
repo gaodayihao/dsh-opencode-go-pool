@@ -169,7 +169,7 @@ Authorization: Bearer <OpenCode Go API Key>
 
 - Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（129 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 38（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
+- 测试：`node --test test/*.test.mjs`（130 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 4（`profile`）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 39（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板与标题行的对齐、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -186,6 +186,13 @@ node --test test/*.test.mjs
 MIT
 
 ## 验证记录
+
+**2026-10-09 额度面板标题行对齐**：`node test/*.test.mjs`（逐个文件、进程内运行）→ 130 项，129 通过、0 跳过；唯一失败仍是 `current-dsh-import` 里需要 `spawn` 子进程的那一项。本轮改动与对应测试：
+
+- **症状**：侧边栏卡片打开的额度面板，右上角「更新于 12:12:29 / 刷新 / ×」里时间明显高出按钮一截。
+- **原因**：`.ogp-header` 用 `align-items:flex-start`（标题块是两行，必须顶对齐），于是它每个子项都按顶边对齐。按钮自带 `height:28px` 并把文字在自己盒子里居中，而时间是一个 `line-height:18px` 的裸 `span`，只有 18px 高 —— 两者顶边对齐后，时间的文字中心在 9px、按钮的在 14px，差了 5px。账户组的组头早就用一个 `span.ogp-groupAction`（`display:inline-flex; align-items:center`）把「刷新 + 时间」包成一行，面板标题行漏了这一步。
+- **修法**：把时间、刷新、× 三者也包进同一个 `ogp-groupAction`（复用既有类，不新增样式）。现在 18px 的时间行被居中到 28px 的行高里，两者文字中心都落在 14px。
+- **测试**：`test/client.test.mjs` 新增 1 项（39）—— 断言三者同在那一个 `ogp-groupAction` 里且顺序为「时间 → 刷新 → 关闭」，并断言标题行下不再有裸的 `.ogp-meta`；为此给测试的 `stubStore` 加了状态覆盖参数，好把 `loadedAt` 喂成非空。
 
 **2026-10-09 输入框胶囊的开关与跟号**：`node test/*.test.mjs`（逐个文件、进程内运行）→ 129 项，128 通过、0 跳过；唯一失败仍是 `current-dsh-import.test.mjs` 里「用真实子进程导入插件入口」那一项（沙箱禁止捕获子进程输出，其等价检查已单独执行通过）。
 

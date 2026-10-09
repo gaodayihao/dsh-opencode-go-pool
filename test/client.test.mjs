@@ -53,9 +53,10 @@ function instantiate(spec, React, extraRequires = {}) {
   })
 }
 
-/** A store stub good enough for a server render: no effects ever run. */
-function stubStore(data) {
-  const state = { data, error: null, failures: 0, loading: false, busy: null, notice: null, loadedAt: null, usageAt: null, pollMs: 30000 }
+/** A store stub good enough for a server render: no effects ever run.
+ * `extra` overrides individual state fields (e.g. a non-null `loadedAt`). */
+function stubStore(data, extra = {}) {
+  const state = { data, error: null, failures: 0, loading: false, busy: null, notice: null, loadedAt: null, usageAt: null, pollMs: 30000, ...extra }
   return {
     get: () => state,
     subscribe: () => () => {},
@@ -671,6 +672,40 @@ test('the dashboard panel renders every account with its three windows', async (
   assert.ok(html.includes('exhaustedBadge'), 'a spent account is flagged')
   assert.ok(html.includes('ogp-windowLabel'), 'the full windows render in the dashboard')
   assert.ok(html.includes('ogp-close'), 'the dashboard keeps its exit')
+})
+
+test('the panel header keeps its timestamp and actions on one centred row', async (t) => {
+  const harness = await loadReact(t)
+  if (!harness) return
+  const { React, renderToString } = harness
+  const spec = await loadClientBundle(t)
+  const module = instantiate(spec, React)
+  const { QuotaPanel } = module.__test
+
+  const html = renderToString(React.createElement(QuotaPanel, {
+    t: key => key,
+    store: stubStore({ ...POOL_STATUS, keys: [KEY] }, { loadedAt: new Date('2026-10-09T12:12:29') }),
+    close: () => {},
+  }))
+
+  // `.ogp-header` is top-aligned so the two-line title block keeps its place,
+  // which top-aligns every sibling with it. The stamp and the two controls must
+  // therefore share ONE row wrapper: `align-items:center` on that row is what
+  // lines the 18px meta line up with the 28px buttons. Without it the timestamp
+  // sits flush with the row top and reads as floating above Refresh.
+  const row = html.indexOf('ogp-groupAction')
+  const stamp = html.indexOf('class="ogp-meta"')
+  const refresh = html.indexOf('>refresh<')
+  const close = html.indexOf('ogp-close')
+  assert.ok(row >= 0, 'the header carries an action row')
+  assert.ok(row < stamp && stamp < refresh && refresh < close,
+    'the stamp, Refresh and Close all sit inside that one row, in that order')
+  assert.ok(html.includes('12:12:29'), 'the stamp renders the read time')
+  // The stamp is not a direct child of the header any more — that bare sibling
+  // was exactly the drifting element.
+  const headerStart = html.indexOf('class="ogp-header"')
+  assert.ok(!html.slice(headerStart, row).includes('ogp-meta'),
+    'no bare meta line is left directly under the header')
 })
 
 test('a two-account page renders both cards, their states and the strategy rows', async (t) => {

@@ -2168,20 +2168,28 @@ button:has(.dsh-ogp-nav-mark) > svg{display:none}
               React.createElement('p', { className: 'ogp-subtitle' }, t('panelSubtitle')),
             ),
             React.createElement('span', { className: 'ogp-spacer' }),
-            snapshot.loadedAt
-              ? React.createElement('span', { className: 'ogp-meta' },
-                  `${t('updatedAt')} ${snapshot.loadedAt.toLocaleTimeString()}`)
-              : null,
-            React.createElement(LinkButton, {
-              disabled: snapshot.loading,
-              onClick: () => store.refresh(),
-            }, snapshot.loading ? t('refreshing') : t('refresh')),
-            React.createElement(Button, {
-              className: 'ogp-close',
-              'aria-label': t('close'),
-              title: t('closeHint'),
-              onClick: close,
-            }, React.createElement('span', { 'aria-hidden': 'true' }, '×')),
+            // The freshness stamp and the two actions are ONE vertically centred
+            // row — the same `ogp-groupAction` the accounts group head uses. The
+            // header itself is top-aligned so the title block keeps its place,
+            // and without this wrapper the 18px meta line sits flush with the
+            // row top while the 28px buttons centre their own label, which reads
+            // as the timestamp floating above the Refresh button.
+            React.createElement('span', { className: 'ogp-groupAction' },
+              snapshot.loadedAt
+                ? React.createElement('span', { className: 'ogp-meta' },
+                    `${t('updatedAt')} ${snapshot.loadedAt.toLocaleTimeString()}`)
+                : null,
+              React.createElement(LinkButton, {
+                disabled: snapshot.loading,
+                onClick: () => store.refresh(),
+              }, snapshot.loading ? t('refreshing') : t('refresh')),
+              React.createElement(Button, {
+                className: 'ogp-close',
+                'aria-label': t('close'),
+                title: t('closeHint'),
+                onClick: close,
+              }, React.createElement('span', { 'aria-hidden': 'true' }, '×')),
+            ),
           ),
 
           data === null && snapshot.error === null
