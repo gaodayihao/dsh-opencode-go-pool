@@ -1,6 +1,6 @@
 {
   "name": "dsh-opencode-go-pool",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "DeepSeek Harness plugin: multi-key pool with automatic quota failover and a usage dashboard for the OpenCode Go plan",
   "license": "MIT",
   "keywords": [
@@ -58,20 +58,20 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-typert-loader": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-typert-loader": "0.2.0-rc.2 || 0.2.1-alpha.1",
     "react": "^18.0.0",
     "react-dom": "^18.0.0"
   },
   "peerDependencies": {
     "react": "^18.0.0",
-    "@deepseek-ai/cordis": "~4.0.5-alpha.1",
-    "@deepseek-ai/schemastery": "~3.18.5-alpha.1",
-    "@deepseek-ai/dsh-typert-protocol": "^0.2.1-alpha.1",
-    "@deepseek-ai/dsh-credentials": "^0.2.1-alpha.1",
-    "@deepseek-ai/dsh-settings": "^0.2.1-alpha.1",
-    "@deepseek-ai/dsh-llm": "^0.2.1-alpha.1",
-    "@deepseek-ai/dsh-llm-pi-ai": "^0.2.1-alpha.1",
-    "@deepseek-ai/dsh-home-paths": "^0.2.1-alpha.1",
+    "@deepseek-ai/cordis": "~4.0.4 || ~4.0.5-alpha.1",
+    "@deepseek-ai/schemastery": "~3.18.4 || ~3.18.5-alpha.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2 || 0.2.1-alpha.1",
+    "@deepseek-ai/dsh-credentials": "0.2.0-rc.2 || 0.2.1-alpha.1",
+    "@deepseek-ai/dsh-settings": "0.2.0-rc.2 || 0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2 || 0.2.1-alpha.1",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.0-rc.2 || 0.2.1-alpha.1",
+    "@deepseek-ai/dsh-home-paths": "0.2.0-rc.2 || 0.2.1-alpha.1",
     "@earendil-works/pi-ai": "^0.87.1"
   }
 }
