@@ -87,6 +87,7 @@ flowchart TD
 - **模型选择**：卡片勾选后写入 `modelMode`/`models`；适配器的 `listModels` 只返回勾选的模型（聊天模型下拉即时生效），`resolveModel`/`stream` 对未勾选模型返回明确的 `UNKNOWN_MODEL`。选择变化会重发 `llm/adapters-updated`，模型选择器无需重启即可刷新。
 - **设置写入**：卡片经 Typert RPC 调 `putKeys`/`putConfig`，host 侧走 DSH 0.2.1 的 `ctx.settings.update(entryId, patch, revision)`（config-editor 支撑的 SettingsForms）；插件 Config 中卡片可编辑的字段声明为 `volatile`，Loader 原地更新并广播 `loader/volatile-update`，插件据此重算 KeyPool / 路由，插件实例不重挂。`route` 保持普通字段：改路由会重挂插件并重新注册适配器。
 - **适配器画像与 auth**：接管模式直接向 `dsh-llm-pi-ai` 提供该路由的*已解析* profile（`piProvider`、`modelErrors`、`configuredMaxTokens`、图像预算等适配器自有字段）。这些字段平时由 llm-pi-ai 的 `Config` 解析产生，插件自建时必须齐备：`PiAiAdapter.modelOf()` 先读 `profile.modelErrors`，缺这个 Map 时每个模型的解析与流式请求都会抛 `Cannot read properties of undefined (reading 'get')`。0.2.1 还把适配器的 `auth`（`{credentials, authContext}`）从可选改为必填，插件提供 `createPiAiAuth()`：不写 pi-ai 凭据记录（Key 一律用 `apiKeyEnv` 引用），只把环境/API 引用解析交给 credentials seam。回归测试见 `test/profile.test.mjs` 与 `test/settings-forms.test.mjs`。
+- **会话头（`x-opencode-session`）**：OpenCode Go 要求每个请求带一个稳定会话 id，缺了就回 `HTTP 400 MissingSessionID`（"Request is missing x-opencode-session and cannot be routed efficiently"）。这个头由 pi-ai 从它自己的 `sessionId` 选项生成，而 `dsh-llm-pi-ai` 的 `sessionId` 取自 Harness 的 `GenerateOptions.sessionId` —— **agent loop 自己的请求带，辅助调用不带**。Auto 权限预设的审查器（`@deepseek-ai/dsh-experimental-auto-review`）正是后者：它只传 `provider/model/system/messages/temperature/signal`，且 options 被 `deepFreeze`，所以在 `llm/stream` 水线上就地补字段既不可能（冻结）也不够（要改成拷贝）。插件把这件事收在 `OpenCodeGoPoolAdapter.stream()` 一处：Harness 给了 id 就用它并记住；没给就复用该路由上最近一次见到的会话 id（辅助调用是为刚跑过的那个会话服务的）；再没有就用插件实例启动时生成的一个稳定 id。写入走 `withSessionId()` 的**浅拷贝**，调用方的请求对象一个字段都不改。
 - **持久化**：运行态（活动 Key / 耗尽 / 失效 / 停用）原子写入 `$DSH_HOME/opencode-go-pool.state.json`，重启恢复。
 
 ## 用量接口
@@ -167,9 +168,9 @@ Authorization: Bearer <OpenCode Go API Key>
 
 纯 ESM，零构建步骤：
 
-- Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`typert.host.js`（RPC 清单）
+- Host 半：`index.js`（插件 + 池适配器 + 接管）、`pool.js`（状态机）、`usage.js`（用量网关）、`models.js`（模型目录拉取）、`transport.js`（网络失败重试预算）、`session.js`（会话头补齐）、`typert.host.js`（RPC 清单）
 - 浏览器半：`client.js`（lazy-CJS bundle，`window.__ModuleLoader__.load` 格式）
-- 测试：`node --test test/*.test.mjs`（132 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 6（`profile`：含思考控制规整 2 项）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 39（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板与标题行的对齐、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
+- 测试：`node --test test/*.test.mjs`（140 项，依赖装齐后 0 跳过）：状态机 17（`pool`）、用量网关 7（`usage`）、模型目录 8（`models`）、网络重试预算 6（`transport`）、cordis 烟测 27（`smoke`：路由接管、静默切换、0.2.1 forms seam、0.1.x register/configEditor 旧 seam、status/usage 拆分、断流分类、高级设置、真实 profile 配置启动、strict wire 契约）、真实服务集成 9（`integration`）、真实 SettingsForms 3（`settings-forms`）、适配器画像与 auth 6（`profile`：含思考控制规整 2 项）、会话头 8（`session`：跟踪器与拷贝语义、无会话请求的稳定补齐、冻结请求不被就地改写、以及注入假 fetch 跑真实 SDK 断言 `x-opencode-session` 真的上了线）、包清单 3（`package`）、导入与 Typert 清单 6 + 1（`current-dsh-import` / `typert-manifest`；前者的「真实子进程导入」一项需要能 `spawn` 的环境）、客户端 bundle 执行与渲染 39（`client`：四个槽位注册、模块分组的四条小标题与三条分隔线、「⋯」位置与顺序、收起态瘦身、侧边栏卡片门控、额度面板与标题行的对齐、store 两段式加载与轮询生命周期、输入框胶囊的开关门控 / 路由门控 / 跟当前账户 / 严重度配色 / 弹层与空态）。缺少 harness 依赖时相关测试优雅跳过。
 
 ```sh
 node --test test/*.test.mjs
@@ -186,6 +187,14 @@ node --test test/*.test.mjs
 MIT
 
 ## 验证记录
+
+**2026-10-12 辅助调用补上 OpenCode Go 必需的会话头**：`node --test --test-isolation=none test/*.test.mjs`（进程内运行）→ 140 项，139 通过、0 跳过；唯一失败仍是 `current-dsh-import.test.mjs` 里需要 `spawn` 子进程的那一项（沙箱禁止捕获子进程输出；插件入口的实际导入由 `test/profile.test.mjs` 就地覆盖）。
+
+- **症状**：开启 Auto 权限预设（Auto review）后，每个工具调用都卡在审查器那一步失败，报 API 缺少 header；关掉 Auto 就一切正常。
+- **定位**：审查器 `classifyRisk()` 只传 `provider/model/system/messages/temperature/signal`，**没有 `sessionId`**；`dsh-llm-pi-ai` 仅在 `options.sessionId !== undefined` 时才把它交给 pi-ai（`dsh-llm-pi-ai/lib/index.js:1885`），而 pi-ai 的 opencode-go 供应商正是用它生成 `x-opencode-session`（`pi-ai/dist/providers/opencode-headers.js`：`if (!options?.sessionId) return options`）。agent loop 自己的请求带 `sessionId`（`dsh-agent-loop/lib/index.js:1274`，并由 `lib/invariant.js` 强制「loop 请求必须带会话 id」），所以主对话正常、辅助调用全线 400 —— 与官方文档把 DeepSeek Harness 列为「部分模型路径带会话信息、部分不带」一致。
+- **网关实测**（2026-10-12，`deepseek-v4.1-flash`、`max_tokens: 4`、直连 `POST https://opencode.ai/zen/go/v1/chat/completions`）：不带该头 → `HTTP 400 {"type":"MissingSessionID","message":"Request is missing x-opencode-session and cannot be routed efficiently."}`；随机 UUID → 200；`ses_…` 形式字符串 → 200；**空字符串 → 400**（等同缺失）；只带 DSH 原生头 `x-deepseek-harness-session-id` → 也 200（官方文档「We recognize its native header」属实）。插件仍走官方文档点名的 `x-opencode-session`，因为 pi-ai 已经把这条路铺好了。官方要求见 [Where can I use it?](https://opencode.ai/v2/docs/console/go#where-can-i-use-it)。
+- **修法**：新增 `session.js`（`SessionIdTracker` + `withSessionId`），在 `OpenCodeGoPoolAdapter.stream()` 一处对**每一次**派发解析会话 id：Harness 的 id 优先并被记住 → 否则复用该路由上最近一次见到的会话 id（辅助调用是为刚跑过的那个会话服务的）→ 否则用插件实例启动时生成的稳定 id（`dsh-opencode-go-pool-<uuid>`）。写入必须是**浅拷贝**：agent loop 的请求对象被 `Object.freeze`、审查器的被 `deepFreeze`，就地赋值在严格模式下直接抛异常。
+- **测试**：`test/session.test.mjs` 8 项 —— 跟踪器（Harness 优先 / 记住 / 空串与非字符串按缺失 / 回退稳定）、`withSessionId` 的拷贝与免拷贝语义、无会话请求送达内层适配器时一定带非空 id、Harness 的 id 会顺延到其后的辅助调用、`deepFreeze` 的请求不被就地改写（原对象仍无 `sessionId`），以及**注入假 `fetch` 跑真实 SDK** 断言两次请求的 wire 头上都出现 `x-opencode-session: session-wire`（辅助调用那次同样如此）、`user-agent` 仍是 `deepseek-harness/...`。
 
 **2026-10-09 标题不再提炼，只抄第一条消息**：`node --test --test-isolation=none test/*.test.mjs`（进程内运行）→ 132 项，131 通过、0 跳过；唯一失败仍是 `current-dsh-import.test.mjs` 里需要 `spawn` 子进程的那一项（沙箱禁止捕获子进程输出；插件入口的实际导入由 `test/profile.test.mjs` 就地覆盖）。
 

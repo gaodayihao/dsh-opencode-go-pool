@@ -1,6 +1,6 @@
 {
   "name": "dsh-opencode-go-pool",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "DeepSeek Harness plugin: multi-key pool with automatic quota failover and a usage dashboard for the OpenCode Go plan",
   "license": "MIT",
   "keywords": [
@@ -25,6 +25,7 @@
     "usage.js",
     "models.js",
     "transport.js",
+    "session.js",
     "typert.host.js",
     "client.js",
     "cordis.patch.yml",

@@ -120,6 +120,14 @@ flowchart LR
 - 配置里只有 `apiKeyEnv`（凭据引用名）；明文 Key 由用户在 DSH 凭据 seam 填写（Web「模型」页或 `~/.dsh/.credentials.yaml` / 环境变量）。
 - 用量网关在内存中短暂持有解析出的 Key 调用官方接口，不落盘、不进任何 RPC 响应。
 
+### D6 会话头：适配器统一补齐 `x-opencode-session`（2026-10-12，插件 v0.3.5）
+
+- **事实**：OpenCode Go 要求每个请求带稳定会话 id，缺失即 `HTTP 400 MissingSessionID`（网关实测：随机 UUID 与 `ses_…` 形式都放行，空串等同缺失）。该头由 pi-ai 的 opencode-go 供应商从它自己的 `options.sessionId` 生成（`providers/opencode-headers.js`），而 `dsh-llm-pi-ai` 只在 Harness 的 `GenerateOptions.sessionId` 存在时才转交（`llm-pi-ai/lib/index.js`）。
+- **问题**：Harness 只在 **agent loop 自己的请求**上带 `sessionId`（`dsh-agent-loop` 还用 invariant 断言这一点）；辅助调用不带 —— Auto 权限预设的审查器（`@deepseek-ai/dsh-experimental-auto-review`）只传 `provider/model/system/messages/temperature/signal`，于是它在本路由上每一次都 400，工具调用全部被审查器失败挡下。而且辅助调用的 options 被 `deepFreeze`、loop 请求被 `Object.freeze`，`llm/stream` 水线上就地补字段在严格模式下直接抛。
+- **决策**：由池适配器 `stream()` 一处统一补齐（`session.js`）：Harness 的 id 优先并记住 → 否则复用该路由上最近一次见到的会话 id → 否则用插件实例启动时生成的稳定 id。写入走 `withSessionId()` 的浅拷贝，调用方对象一个字段都不动。
+- **取舍**：记住「最近一次会话 id」是**路由提示**而非身份判定 —— 并发会话下辅助调用可能落进兄弟会话的桶，只影响网关的路由/前缀缓存归属，不影响任何正确性；换来的是审查器这种固定 system 前缀的辅助调用能持续命中同一个桶，同时不必为每个辅助请求制造一个假会话。
+- **备选与否决**：`llm/stream` 水线改 options（冻结，不可行）；在插件 Config 里配一个静态 `headers['x-opencode-session']`（会连主对话的真实会话 id 一起顶掉，毁掉路由/缓存，否决）；给辅助调用每次生成新 id（官方要的是「每个会话一个稳定 id」，且会让网关看到大量假会话，否决）。
+
 ---
 
 ## 5. Host 半设计
@@ -188,13 +196,16 @@ class OpenCodeGoPoolAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const attempts = this.pool.healthyCount() + 1
+    // D6：本次派发的会话 id（Harness 优先 → 记住的最近一次 → 实例级稳定 id），
+    // 浅拷贝写入，因为 loop 请求被 freeze、审查器的 options 被 deepFreeze。
+    const request = withSessionId(options, this.sessionIds.idFor(options))
     for (let attempt = 0; attempt < attempts; attempt++) {
       const keyId = this.pool.resolveKeyForCall()      // 一次调用冻结
       if (!keyId) { yield quotaExhaustedFinish(); return }  // 全池耗尽
       const inner = this.withKey(keyId)                 // resolveApiKey 绑定该 Key 凭据
       let emittedContent = false
       try {
-        for await (const chunk of inner.stream(options)) {
+        for await (const chunk of inner.stream(request)) {
           if (chunk.type === 'finish') {
             if (chunk.kind === 'error' && isRotationTrigger(chunk.failure)) {
               this.pool.onFailure(keyId, chunk.failure)

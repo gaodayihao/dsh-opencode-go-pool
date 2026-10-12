@@ -25,6 +25,7 @@
  * @module dsh-opencode-go-pool
  */
 
+import { randomUUID } from 'node:crypto'
 import { access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -46,6 +47,7 @@ import {
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { opencodeGoProvider } from '@earendil-works/pi-ai/providers/opencode-go'
 import { AUTH_CODE, KeyPool, assertKeyList } from './pool.js'
+import { SessionIdTracker, withSessionId } from './session.js'
 import {
   DEFAULT_TRANSPORT_MAX_RETRIES,
   MAX_TRANSPORT_MAX_RETRIES,
@@ -475,7 +477,8 @@ function failureOf(error) {
 
 /**
  * The pool adapter. Metadata (catalog, retry policy shape, model resolution)
- * delegates to a catalog PiAiAdapter; stream() runs the failover loop.
+ * delegates to a catalog PiAiAdapter; stream() runs the failover loop and is the
+ * single place every request on this route acquires its OpenCode Go session id.
  */
 class OpenCodeGoPoolAdapter extends LlmAdapter {
   constructor(plugin) {
@@ -522,6 +525,13 @@ class OpenCodeGoPoolAdapter extends LlmAdapter {
         'UNKNOWN_MODEL',
       )
     }
+    // Every dispatched request carries a session id, because pi-ai turns it into
+    // OpenCode Go's required `x-opencode-session` header and the gateway answers
+    // 400 MissingSessionID without it. The harness supplies one on its own loop
+    // requests and none on auxiliary ones (the Auto preset's reviewer is the one
+    // that surfaced this), so the tracker fills the gap and `withSessionId`
+    // copies rather than mutates — auxiliary callers deep-freeze their options.
+    const request = withSessionId(options, this.plugin.sessionIds.idFor(options))
     const pool = this.plugin.pool
     const attempts = pool.usableCount() + 1
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -535,7 +545,7 @@ class OpenCodeGoPoolAdapter extends LlmAdapter {
       let silentRetry = false
       let finish = null
       try {
-        for await (const chunk of inner.stream(options)) {
+        for await (const chunk of inner.stream(request)) {
           if (chunk.type === 'finish') {
             if (chunk.reason.kind === 'error') {
               // quota/auth codes rotate the pool; other codes count the
@@ -614,6 +624,12 @@ export class OpenCodeGoPool extends TypertRemoteService {
     // Per-request TRANSPORT retry budget (see ./transport.js).
     this.transportBudget = new TransportBudget()
     this.transportSessions = new WeakMap()
+    // The session identity every request on this route carries (see ./session.js).
+    // OpenCode Go answers HTTP 400 MissingSessionID without it, and the harness
+    // only names a session on its own loop requests — auxiliary callers such as
+    // the Auto preset's reviewer dispatch without one. The fallback is minted
+    // once per plugin instance, so it is stable for the whole process.
+    this.sessionIds = new SessionIdTracker(`dsh-opencode-go-pool-${randomUUID()}`)
     // The one auth injection every PiAiAdapter this plugin builds shares.
     this.piAiAuth = createPiAiAuth(ctx)
     // Models pulled from the official models endpoint (id → {id, name}).
