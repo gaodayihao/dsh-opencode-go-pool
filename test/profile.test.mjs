@@ -223,3 +223,112 @@ test('the served catalog normalizes the shipped model and offers a real Off', as
   assert.ok(shipped, 'the installed catalog ships the flash model this regression is about')
   assert.ok(!('off' in shipped.thinkingLevelMap), 'the shipped flash model is normalized in the served catalog')
 })
+
+// ---- completion-budget reservation -----------------------------------------
+//
+// `dsh-compaction-basic` sizes its automatic compaction threshold as
+//
+//   min(contextWindow × thresholdRatio, contextWindow − reserved − headroom)
+//
+// where `reserved` is the adapter's `defaultMaxTokens`, and llm-pi-ai publishes
+// exactly that from this profile's `configuredMaxTokens` map. An empty map made
+// `reserved` 0 and the threshold `contextWindow × 0.8` = 800000.
+//
+// The descriptors this route serves put their own `maxTokens` on the wire as
+// `max_tokens` (384000 on every DeepSeek model here), and the gateway rejects
+// `prompt + max_tokens > 1,048,576` — so the real prompt ceiling is 664576, i.e.
+// 135424 tokens BELOW the threshold the harness believed in. A session that grew
+// into that gap got `HTTP 400` on every request; when the gateway forwarded no
+// error body the harness read it as `400 status code (no body)`, could not
+// classify it as a context overflow, and neither automatic compaction trigger
+// fired — the session was stuck for good and subagent sessions, which have no
+// `/compact`, could not be rescued at all. Regression: sessions died at prompt
+// 664086 / 664277 / 665115 / 665815 / 666412 on DSH 0.2.0-rc.2.
+
+test("the profile reserves each served model's own completion budget", async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { buildProfile } = harness
+  const profile = buildProfile(route, () => [])
+  const budgets = profile.configuredMaxTokens
+
+  assert.ok(budgets instanceof Map, 'still the Map llm-pi-ai reads')
+  assert.equal(budgets.get('deepseek-v4.1-flash'), 384000, 'the model this regression is about reserves 384000')
+  assert.equal(budgets.get('glm-5.1'), 32768, 'a model with a small cap reports its own number')
+  assert.equal(budgets.get('no-such-model'), undefined, 'an unserved id declares nothing')
+  assert.equal(budgets.has('deepseek-v4.1-flash'), true)
+  assert.equal(budgets.has('no-such-model'), false)
+  assert.equal(budgets.size, profile.piProvider.getModels().length, 'every served model declares its budget')
+
+  // The arithmetic the fix exists for, on the shipped numbers.
+  const contextWindow = 1000000
+  const headroomTokens = 65536
+  const gatewayCeiling = 1048576
+  const promptCeiling = gatewayCeiling - budgets.get('deepseek-v4.1-flash')
+  const threshold = (reserved) => Math.floor(Math.min(
+    contextWindow * 0.8,
+    contextWindow - reserved - headroomTokens,
+  ))
+  assert.equal(promptCeiling, 664576)
+  assert.equal(threshold(0), 800000, 'an empty map put the threshold here')
+  assert.equal(threshold(384000), 550464, 'a reserved budget puts it here')
+  assert.ok(threshold(0) > promptCeiling, 'the empty map left the threshold above the real prompt ceiling')
+  assert.ok(threshold(384000) < promptCeiling, 'the reserved budget keeps it below')
+})
+
+test('the completion-budget view follows the served catalog and tolerates a malformed cap', async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { buildProfile } = harness
+  let dynamicModelDescriptor
+  try {
+    ;({ dynamicModelDescriptor } = await import('../models.js'))
+  } catch {
+    t.skip('../models.js is not importable')
+    return
+  }
+
+  // refreshModels() appends fetched descriptors to the provider WITHOUT
+  // rebuilding the profile, so a snapshot taken at build time would go back to
+  // reserving nothing for every model fetched afterwards.
+  const fetched = []
+  const profile = buildProfile(route, () => fetched.map(entry => dynamicModelDescriptor(entry.id, entry.name, route)))
+  assert.equal(profile.configuredMaxTokens.get('late-model'), undefined, 'nothing fetched yet')
+  fetched.push({ id: 'late-model', name: 'Late Model' })
+  assert.equal(profile.configuredMaxTokens.get('late-model'), 131072, 'a fetched model is picked up without a rebuild')
+  assert.equal(profile.configuredMaxTokens.size, profile.piProvider.getModels().length)
+
+  // normalizeModelInfo throws INVALID_MODEL_MAX_TOKENS on a bad value, which
+  // would break every request on the route, so a malformed cap must answer
+  // "no declared budget" instead of reaching the adapter.
+  const broken = buildProfile(route, () => [{ id: 'zero-cap', maxTokens: 0 }])
+  assert.equal(broken.configuredMaxTokens.get('zero-cap'), undefined)
+  const texty = buildProfile(route, () => [{ id: 'texty-cap', maxTokens: '131072' }])
+  assert.equal(texty.configuredMaxTokens.get('texty-cap'), undefined)
+})
+
+test('the installed PiAiAdapter publishes the reserved budget as defaultMaxTokens', async (t) => {
+  const harness = await loadProfile(t)
+  if (harness === null) return
+  const { buildProfile, PiAiAdapter, createPiAiAuth } = harness
+  const profile = buildProfile(route, () => [])
+  const adapter = new PiAiAdapter({
+    profiles: () => new Map([[route, profile]]),
+    resolveApiKey: async () => { throw new Error('the catalog adapter never resolves keys') },
+    auth: createPiAiAuth({ get: () => undefined }),
+    resolveAttachments: () => undefined,
+  })
+
+  const resolve = async (id) => (typeof adapter.prepareCall === 'function'
+    ? (await adapter.prepareCall(route, id)).model
+    : await adapter.resolveModel(route, id))
+
+  const flash = await resolve('deepseek-v4.1-flash')
+  assert.equal(flash.defaultMaxTokens, 384000, 'llm-pi-ai reports the number compaction must reserve')
+  assert.equal(flash.context.contextWindow, 1000000)
+
+  const glm = await resolve('glm-5.1')
+  assert.equal(glm.defaultMaxTokens, 32768, 'the cap is per model, not one route-wide constant')
+  assert.equal(glm.context.contextWindow, 202752)
+})
+

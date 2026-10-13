@@ -245,7 +245,7 @@ const profile: ResolvedPiAiProviderProfile = {
   streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   retryPolicy: resolveRetryPolicy(undefined),
   piProvider: opencodeGoProvider(),   // pi-ai 目录自带
-  configuredMaxTokens: new Map(),
+  configuredMaxTokens: new CatalogMaxTokens(() => provider.getModels()),  // 每个模型自己的补全预算
   // models 留空 → 完整目录；baseURL 留空 → 各模型自带端点
 }
 const inner = new PiAiAdapter({
@@ -253,6 +253,8 @@ const inner = new PiAiAdapter({
   resolveApiKey: (_p, _prof) => pool.resolveKeyForCallKey(),  // 池选中的 Key
 })
 ```
+
+> **补全预算（2026-10-13）**：`configuredMaxTokens` 不是可留空的装饰字段。`PiAiAdapter.modelInfo()` 把它当模型的 `defaultMaxTokens` 上报，`dsh-compaction-basic` 再拿这个数从上下文窗口里扣掉，才算自动压缩阈值 —— `min(contextWindow × thresholdRatio, contextWindow − reserved − headroom)`。留一个空 `Map` 等于告诉 Harness「每次请求预留 0 个补全 token」，阈值就退化成 `contextWindow × 0.8` = 800000。但本路由的 descriptor 会把自己的 `maxTokens` 当 `max_tokens` 发上线（DeepSeek 系 384000、多数 131072、glm-5.1 仅 32768），而网关拒绝 `prompt + max_tokens > 1,048,576`，所以 `deepseek-v4.1-flash` 真实的 prompt 上限只有 664576 —— 比 Harness 以为的阈值低 135424。这段空档里每次都必被 `HTTP 400` 拒绝；网关偶尔不转发错误体时 Harness 只看到 `400 status code (no body)`，判不出是上下文溢出，两条自动压缩路径全都不触发，会话就此卡死（subagent 会话没有 `/compact`，尤其救不回来）。因此改成 `CatalogMaxTokens`：读时从 `getModels()` 现算，因为 `refreshModels()` 会把拉取到的新模型追加进 provider 却**不**重建 profile，快照式的 `Map` 会让新模型重新退回「预留 0」。
 
 > **思考控制（2026-10-09）**：pi-ai 的 `openai-completions` 只在 `model.thinkingLevelMap.off !== null` 时才发 `thinking: { type: 'disabled' }`。目录里的 `deepseek-v4.1-flash` 恰好声明了 `off: null`，所以「没带 reasoning effort 的请求」不带任何思考控制，网关按默认（思考开）推理；而 Harness 的辅助调用（`purpose: 'session-title'`、`maxOutputTokens: 64`）正是这种形状 —— 64 token 全被思考吃掉、正文为空，标题调用被判失败，会话只留下兜底标题。同路由的 `deepseek-v4-flash` / `deepseek-v4-pro` / `kimi-k2.6` 都没有 `off` 键，本来就会带上 disabled。插件在 `buildProfile().getModels()` 里用 `withExplicitThinkingOff` 去掉这种 null `off`（只处理 `thinkingFormat: 'deepseek'`，其他厂商的 `off: null` 保持原义）。网关实测（2026-10-09）：控制组 `finish=length`、正文 0 字、64 reasoning tokens；加 `thinking: { type: 'disabled' }` 后 `finish=stop`、23 output tokens、0 reasoning tokens。
 

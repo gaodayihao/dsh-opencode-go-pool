@@ -302,6 +302,120 @@ export function withExplicitThinkingOff(model) {
 }
 
 /**
+ * The completion budget every served model reserves, as the read-through
+ * `configuredMaxTokens` view `dsh-llm-pi-ai`'s PiAiAdapter reads.
+ *
+ * `PiAiAdapter.modelInfo()` publishes this map's entry for a model as that
+ * model's `defaultMaxTokens` — "the adapter's per-request default, which the
+ * adapter materializes when that envelope omits one". `dsh-compaction-basic`
+ * then subtracts exactly that number from the context window before it sizes
+ * its automatic compaction threshold:
+ *
+ *   thresholdTokens = min(contextWindow × thresholdRatio,
+ *                         contextWindow − reservedCompletionTokens − headroomTokens)
+ *
+ * An empty map therefore told the harness a request reserved *nothing*, and the
+ * threshold collapsed to `contextWindow × 0.8` = 800000. But the descriptors
+ * this route serves put their own `maxTokens` on the wire as `max_tokens` —
+ * 384000 on every DeepSeek model on this plan, 131072 on most others, 32768 on
+ * glm-5.1 — and the gateway rejects any request where
+ * `prompt + max_tokens > 1,048,576`. For `deepseek-v4.1-flash` the real prompt
+ * ceiling is thus 664576, i.e. 135424 tokens BELOW the threshold the harness
+ * believed in, and that gap is a dead zone: the session grows into it, the
+ * gateway answers `HTTP 400`, and whenever it forwards no error body the reply
+ * reads `400 status code (no body)` — a shape the harness cannot classify as a
+ * context overflow, so neither automatic trigger fires and every retry re-sends
+ * the same oversized request. Measured on DSH 0.2.0-rc.2: sessions died at
+ * prompt 664086 / 664277 / 665115 / 665815 / 666412, i.e. exactly at the
+ * 664576 boundary, while `meter.measure()` sat at ~666000 — far under the
+ * harness's 800000 threshold.
+ *
+ * Derived from `getModels()` on every read instead of snapshotting a Map:
+ * pi-ai's provider is the authority on what this route serves, and
+ * `refreshModels()` appends fetched descriptors to it WITHOUT rebuilding the
+ * profile, so a snapshot would silently go back to reserving nothing for every
+ * newly fetched model. The derivation walks a few dozen descriptors, which is
+ * free next to the request it sizes.
+ */
+export class CatalogMaxTokens extends Map {
+  #models
+
+  /**
+   * @param models - `() => Array<object>` returning the served pi-ai
+   *   descriptors, i.e. the wrapper provider's own `getModels()`.
+   */
+  constructor(models) {
+    super()
+    this.#models = models
+  }
+
+  /** The served catalog as a plain Map of model id → declared completion budget. */
+  #snapshot() {
+    const snapshot = new Map()
+    for (const model of this.#models()) {
+      if (declaredMaxTokens(model) !== undefined) snapshot.set(model.id, model.maxTokens)
+    }
+    return snapshot
+  }
+
+  /**
+   * @param id - exact pi-ai model id.
+   * @returns the model's declared completion budget, or undefined when the
+   *   catalog declares none — llm-pi-ai's normalizeModelInfo throws
+   *   `INVALID_MODEL_MAX_TOKENS` on a non-positive non-integer here, which
+   *   would break every request on the route, so a malformed descriptor answers
+   *   "no declared budget" instead.
+   */
+  get(id) {
+    for (const model of this.#models()) {
+      if (model?.id === id) return declaredMaxTokens(model)
+    }
+    return undefined
+  }
+
+  /** @param id - exact pi-ai model id. @returns true when a budget is declared. */
+  has(id) {
+    return this.get(id) !== undefined
+  }
+
+  get size() {
+    return this.#snapshot().size
+  }
+
+  entries() {
+    return this.#snapshot().entries()
+  }
+
+  keys() {
+    return this.#snapshot().keys()
+  }
+
+  values() {
+    return this.#snapshot().values()
+  }
+
+  forEach(callback, thisArg) {
+    this.#snapshot().forEach(callback, thisArg)
+  }
+
+  [Symbol.iterator]() {
+    return this.#snapshot()[Symbol.iterator]()
+  }
+}
+
+/**
+ * The usable completion budget of one served descriptor, or undefined.
+ * @param model - pi-ai model descriptor.
+ * @returns `model.maxTokens` when it is a positive safe integer.
+ */
+function declaredMaxTokens(model) {
+  const maxTokens = model?.maxTokens
+  return typeof model?.id === 'string' && Number.isSafeInteger(maxTokens) && maxTokens > 0
+    ? maxTokens
+    : undefined
+}
+
+/**
  * Build the resolved pi-ai profile for the opencode-go catalog route.
  *
  * The catalog provider is wrapped so that models fetched from the official
@@ -345,7 +459,12 @@ export function buildProfile(route, dynamicDescriptors, tuning = {}) {
     requestImageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
     retryPolicy: resolveRetryPolicy(undefined, 'opencode-go-pool.catalog.retryPolicy'),
     piProvider: provider,
-    configuredMaxTokens: new Map(),
+    // Every served model's own completion budget. llm-pi-ai reads this map per
+    // model to publish `defaultMaxTokens`, which is the number the compaction
+    // threshold subtracts from the context window; leaving it empty makes the
+    // harness size that threshold 135424 tokens above the gateway's real prompt
+    // ceiling and a session that reaches the gap can never recover on its own.
+    configuredMaxTokens: new CatalogMaxTokens(() => provider.getModels()),
     // PiAiAdapter.modelOf() reads profile.modelErrors before it resolves any
     // model, so a profile without this map fails every
     // resolveModel/listModels-info/stream with "Cannot read properties of
