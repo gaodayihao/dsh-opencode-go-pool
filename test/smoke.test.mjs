@@ -95,6 +95,32 @@ test('plugin registers the opencode-go route and serves the pi-ai catalog', asyn
   await root.fiber.dispose()
 })
 
+test('the catalog adapter answers the 0.2.1-rc.2 credential probe before listModels', async (t) => {
+  const harness = await loadHarness(t)
+  if (!harness) return
+  const { Context, OpenCodeGoPool } = harness
+
+  // 0.2.1-rc.2's PiAiAdapter.listModels() awaits this probe before it lists a
+  // route: MISSING_CREDENTIAL publishes an empty catalog and any other rejection
+  // reaches the model picker ("the catalog adapter never resolves keys" was the
+  // old sentinel surfacing there). 0.2.1-alpha.1 never asked.
+  const dry = await bootPlugin(Context, OpenCodeGoPool, {})
+  const dryKey = await dry.plugin.innerCatalog.config.resolveApiKey('opencode-go', undefined)
+  assert.equal(typeof dryKey, 'string')
+  assert.ok(dryKey.length > 0, 'an empty pool answers with a non-empty stand-in, so the catalog still lists')
+  await dry.root.fiber.dispose()
+
+  // With a stored key the probe resolves the real credential (the active key first).
+  const keyed = await bootPlugin(Context, OpenCodeGoPool, {
+    keys: [{ id: 'acc-a', label: '主号', apiKeyEnv: 'OPENCODE_GO_KEY_A' }],
+  }, {
+    credentials: { resolve: async ref => ({ value: `sk-${String(ref)}` }) },
+  })
+  const key = await keyed.plugin.innerCatalog.config.resolveApiKey('opencode-go', undefined)
+  assert.equal(key, 'sk-OPENCODE_GO_KEY_A', 'the probe returns the pool key, not a sentinel')
+  await keyed.root.fiber.dispose()
+})
+
 test('a key without a resolvable credential fails the stream loud (MISSING_CREDENTIAL)', async (t) => {
   const harness = await loadHarness(t)
   if (!harness) return

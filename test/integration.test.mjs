@@ -80,7 +80,10 @@ async function bootReal(Context, LlmRuntime, OpenCodeGoPool, entryConfig) {
   await root.plugin(LlmRuntime)
   const settings = createFormsSettings(root)
   root.provide('settings', settings.service)
-  root.provide('credentials', { resolve: async () => undefined })
+  // 0.2.1-rc.2's PiAiAdapter.listModels() probes the route's credential before
+  // listing it, so the harness has to hold a resolvable key the way a configured
+  // pool does; the missing-credential path has its own smoke test.
+  root.provide('credentials', { resolve: async ref => ({ value: `sk-${String(ref)}` }) })
   const fiber = await root.plugin(OpenCodeGoPool, entryConfig ?? { keys: TWO_KEYS })
   settings.bind(fiber.config)
   return { root, settings: settings.state, llm: root.get('llm'), plugin: root.get('opencodePool') }

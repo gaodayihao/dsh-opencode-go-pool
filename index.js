@@ -73,6 +73,15 @@ const ALT_ROUTE = 'opencode-go-pool'
 const DEFAULT_USAGE_BASE_URL = 'https://opencode.ai/zen/go/v1/usage'
 const DEFAULT_MODELS_BASE_URL = 'https://opencode.ai/zen/go/v1/models'
 const MODELS_CACHE_FILE = 'opencode-go-pool.models.json'
+/**
+ * Answer to the host's catalog credential probe when the pool has no
+ * resolvable key. DSH 0.2.1-rc.2 asks `PiAiAdapter.listModels()` for a key
+ * before publishing a route's models; the catalog adapter here never streams
+ * (per-attempt adapters do), and an empty pool must still offer the catalog to
+ * the card's model selection, so the probe must return a non-empty string
+ * rather than MISSING_CREDENTIAL.
+ */
+const CATALOG_STANDIN_KEY = 'opencode-go-pool:catalog-only'
 const DEFAULT_USAGE_REFRESH_MS = 30000
 const DEFAULT_TIMEOUT_MS = 15000
 const USAGE_CACHE_TTL_MS = 15000
@@ -881,9 +890,13 @@ export class OpenCodeGoPool extends TypertRemoteService {
       )]])
       this.innerCatalog = new PiAiAdapter({
         profiles: () => this.profileMap,
-        resolveApiKey: async () => {
-          throw new Error('opencode-go-pool: the catalog adapter never resolves keys')
-        },
+        // DSH 0.2.1-rc.2's listModels() probes this before listing a route
+        // (MISSING_CREDENTIAL means "hide the catalog"; any other rejection
+        // reaches the model picker). 0.2.1-alpha.1 never asked, which is why
+        // the old "never resolves keys" sentinel only surfaced after the
+        // upgrade — the catalog is metadata-only, so answer with a real key
+        // when one resolves (see catalogApiKey).
+        resolveApiKey: () => this.catalogApiKey(),
         auth: this.piAiAuth,
         resolveAttachments: () => this.ctx.get('attachments'),
       })
@@ -972,6 +985,36 @@ export class OpenCodeGoPool extends TypertRemoteService {
       auth: this.piAiAuth,
       resolveAttachments: () => this.ctx.get('attachments'),
     })
+  }
+
+  /**
+   * The credential answer the catalog route's `PiAiAdapter` gives the host.
+   *
+   * 0.2.1-rc.2's `listModels()` calls `resolveApiKey(provider, profile)` first:
+   * a MISSING_CREDENTIAL answer publishes an empty catalog, anything else is
+   * rethrown to the caller. The catalog adapter never streams — every request
+   * goes through `makeAttemptAdapter()` — so this answer only states that the
+   * route is worth listing. Prefer the active key's credential, then any
+   * configured key, so an exhausted/preempted/disabled key never hides the
+   * model list. With no key to resolve at all, answer the stand-in: the card's
+   * model selection must still show the catalog before the first key is added.
+   * @returns a non-empty key string, never a rejection.
+   */
+  async catalogApiKey() {
+    const entries = this.pool.entries()
+    const ordered = [
+      ...entries.filter(entry => entry.id === this.pool.activeId),
+      ...entries.filter(entry => entry.id !== this.pool.activeId),
+    ]
+    for (const entry of ordered) {
+      try {
+        const value = await this.resolveKeyValue(entry)
+        if (typeof value === 'string' && value.length > 0) return value
+      } catch {
+        // An unresolvable key must not hide the catalog; try the next one.
+      }
+    }
+    return CATALOG_STANDIN_KEY
   }
 
   /** Resolve one key's credential reference through the credentials seam. */

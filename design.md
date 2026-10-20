@@ -14,6 +14,8 @@
 > - **兼容性由 `engines.dsh` 单独决定**：`"dsh": ">=0.2.0-rc.2"`。宿主在清单声明 `engines.dsh` 时只比较这一个范围、忽略 DSH 的 peer 范围，且预发布版本参与匹配——因此 0.2.1-rc.2 / 0.2.1 以及后续 0.3.x、1.x 都直接通过，不再随补丁或预发布号变化失效。
 > - **peer 范围同步放宽**：`@deepseek-ai/dsh-*` 全部为 `>=0.2.0-rc.2`，`@deepseek-ai/cordis` 为 `>=4.0.4`，`@deepseek-ai/schemastery` 为 `>=3.18.4`；devDependency `@deepseek-ai/dsh-typert-loader` 同步放宽。
 > - 范围下限仍是 0.2.0 系：0.1.x 的设置 seam 只是代码层回退路径，清单不再声称支持。
+>
+> **版本适配（2026-10-20，插件 v0.3.8）**：DSH `0.2.1-rc.2` 的 `PiAiAdapter.listModels()` 在列出某路由的模型前会先 `await config.resolveApiKey(provider, profile)`（`MISSING_CREDENTIAL` 视为该路由未配置、返回空目录，其他异常原样抛给调用方）。目录适配器原先的哨兵（`throw 'the catalog adapter never resolves keys'`）因此在模型选择器里表现为「加载失败」、设置页「模型目录暂不可用」，拉取模型后可选列表仍是 0 个。现改为 `catalogApiKey()`：优先解析活动 Key 的凭据，其次任一已配置 Key（Key 耗尽/停用/preempt 都不影响目录可见性），完全没有 Key 时返回非空占位——目录适配器只做元数据，流式请求永远走 `makeAttemptAdapter()` 的每 Key 适配器。
 
 ---
 
