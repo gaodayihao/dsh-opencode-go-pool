@@ -87,6 +87,35 @@ test('the package declares the client bundle the way the loader reads it', () =>
   assert.equal(scripts.build, undefined, 'the plugin is plain ESM with no build step')
 })
 
+test('the DSH compatibility gate is one open-ended range the host accepts', async (t) => {
+  const pkg = manifest()
+
+  // The host gates a plugin (or bundle) on its DSH requirement before loading
+  // it: app-boot's evaluatePluginCompatibility lets `engines.dsh` decide alone
+  // and ignores every `@deepseek-ai/dsh-*` peer range when it is declared.
+  // Pinning that requirement to the release the plugin was built against is how
+  // DSH 0.2.1-rc.2 rejected v0.3.6; one open-ended range is the fix.
+  assert.equal(typeof pkg.engines?.dsh, 'string', 'package.json declares engines.dsh')
+  assert.match(pkg.engines.dsh, />=0\.2\.0/, 'engines.dsh sets the minimum supported runtime')
+  assert.ok(!pkg.engines.dsh.includes('<'), 'engines.dsh has no upper bound, so a DSH upgrade is not refused')
+
+  let evaluatePluginCompatibility
+  try {
+    ;({ evaluatePluginCompatibility } = await import('@deepseek-ai/dsh-app-boot'))
+  } catch {
+    t.skip('dsh-app-boot not installed')
+    return
+  }
+  // The real gate, evaluated the way the host does (prereleases participate in
+  // ranges). 0.2.1-rc.2 is the runtime that failed; later releases must pass too,
+  // or the next DSH upgrade disables the plugin again.
+  for (const runtime of ['0.2.0-rc.2', '0.2.1-alpha.1', '0.2.1-rc.2', '0.2.1', '0.3.0-alpha.1', '0.3.0', '1.0.0']) {
+    const issue = evaluatePluginCompatibility(pkg, {}, runtime)
+    assert.equal(issue, undefined,
+      `DSH ${runtime} accepts the manifest${issue ? `: ${JSON.stringify(issue.requirements)}` : ''}`)
+  }
+})
+
 test('the bundle patch names the plugin exactly as the manifest does', () => {
   const pkg = manifest()
   const patch = readFileSync(join(root, pkg.dsh.bundle.patch.replace(/^\.\//, '')), 'utf8')

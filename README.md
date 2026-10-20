@@ -4,7 +4,7 @@ DeepSeek Harness（DSH）插件：**OpenCode Go 套餐的多 Key 池** —— �
 
 - 每个 OpenCode Go 账号有独立的 5 小时滚动 + 每周 + 每月额度。DSH 官方供应商（`dsh-llm-pi-ai` 的 `opencode-go` 路由）每个供应商只能填一个 Key，额度耗尽后必须手动更换——本插件接管该路由，用 Key 池 + 自动故障切换解决。
 - 余额数据来自 OpenCode 官方用量接口（与官网同源，见下文）。
-- **运行环境**：DSH `0.2.1-alpha.1`（`peerDependencies` 锁定该系列；0.1.x 的设置 seam 仍兼容，但新特性以 0.2.1 的 volatile 配置为准）。
+- **运行环境**：DSH `≥ 0.2.0-rc.2`。清单用 `engines.dsh: ">=0.2.0-rc.2"` 声明兼容下限、不锁上限，`@deepseek-ai/dsh-*` 的 peer 范围同步开区间——DSH 之后升级到新的 rc/alpha 或 0.3+ 时不会再被判定不兼容（0.1.x 的设置 seam 仅保留为代码内回退，不在支持声明内；新特性以 0.2.x 的 volatile 配置为准）。
 
 ## 功能
 

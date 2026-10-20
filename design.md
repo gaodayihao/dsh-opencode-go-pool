@@ -9,6 +9,11 @@
 > - **适配器**：`PiAiAdapter` 的 `auth`（`{credentials, authContext}`）由可选改为必填；插件新增 `createPiAiAuth()`（不写 pi-ai 凭据记录，Key 一律走 `apiKeyEnv` 引用 + credentials seam）。`ResolvedPiAiProviderProfile` 不再读取 `modelCapabilities`。
 > - **依赖**：`peerDependencies` 由 `^0.1.0-rc.5` 提升为 `^0.2.1-alpha.1`（`@deepseek-ai/cordis ~4.0.5-alpha.1`、`schemastery ~3.18.5-alpha.1`、`@earendil-works/pi-ai ^0.87.1`）。
 > - **客户端**：`dsh.client.inject` 中的 `@deepseek-ai/dsh-client-runtime` 在 0.2.1 已不存在，改为实际提供 `slots`/设置页外壳的 `@deepseek-ai/dsh-client-ui-slots`。
+>
+> **版本适配（2026-10-20，插件 v0.3.7）**：DSH 升级到 `0.2.1-rc.2` 后，旧的精确 `peerDependencies`（`0.2.0-rc.2 || 0.2.1-alpha.1`）不再匹配运行时版本，插件被宿主按「不兼容」拒绝加载。清单改为：
+> - **兼容性由 `engines.dsh` 单独决定**：`"dsh": ">=0.2.0-rc.2"`。宿主在清单声明 `engines.dsh` 时只比较这一个范围、忽略 DSH 的 peer 范围，且预发布版本参与匹配——因此 0.2.1-rc.2 / 0.2.1 以及后续 0.3.x、1.x 都直接通过，不再随补丁或预发布号变化失效。
+> - **peer 范围同步放宽**：`@deepseek-ai/dsh-*` 全部为 `>=0.2.0-rc.2`，`@deepseek-ai/cordis` 为 `>=4.0.4`，`@deepseek-ai/schemastery` 为 `>=3.18.4`；devDependency `@deepseek-ai/dsh-typert-loader` 同步放宽。
+> - 范围下限仍是 0.2.0 系：0.1.x 的设置 seam 只是代码层回退路径，清单不再声称支持。
 
 ---
 
@@ -443,7 +448,7 @@ type Window = { status: string|null; percent: number|null; resetsAt: string|null
 |---|---|---|
 | `/v1/usage` 未写入 OpenCode 公开文档，接口或字段变动 | 卡片数据失效 | 防御式解析、`usageBaseUrl` 可配、卡片降级显示；切换功能不依赖该接口 |
 | 额度错误形态上游变化 | 切换失效 | `isRotationTrigger` 可配置自定义判定（§8 预案） |
-| `PiAiAdapter` 或 `ResolvedPiAiProviderProfile` 在后续 rc 版本中签名变化 | 插件不兼容 | peerDependency 锁定 `^0.1.0-rc.7` 系列；升级时做兼容矩阵测试 |
+| `PiAiAdapter` 或 `ResolvedPiAiProviderProfile` 在后续 rc 版本中签名变化 | 插件不兼容 | 兼容下限由 `engines.dsh`（`>=0.2.0-rc.2`，开区间）声明，不锁死补丁/预发布版本；DSH 升级后跑一次兼容矩阵测试（`node --test test/*.test.mjs`）发现签名破坏 |
 | pi-ai 目录 opencode-go 端点/模型变动 | 请求打错端点 | 随 pi-ai 目录自动更新（透传）；模板档案不硬编码模型列表 |
 | 多账号使用违反 OpenCode 服务条款 | 账号风险 | 用户自行确认；插件仅提供技术能力，README 注明 |
 | 双插件并存（本插件 + dsh-opencode-go-usage） | 两个相似页面 | 页面 id 不同可并存；README 建议二选一 |
